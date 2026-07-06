@@ -21,6 +21,13 @@ pydantic
 # Local fuzzy search (song/event matching, JP/KR/ZH romanization)
 rapidfuzz
 cutlet
+
+# mojimoji (cutlet dep) has no PyPI wheels past cp312 and its old sdist doesn't
+# compile on 3.13+. Master builds fine (needs a C++ compiler + Cython, handled
+# by its pyproject). Drop this once upstream ships new wheels
+# (https://github.com/studio-ousia/mojimoji/pull/28).
+mojimoji @ git+https://github.com/studio-ousia/mojimoji@2fb1f46c96f716da596f02707fdfae8621be6c98 ; python_version >= "3.13"
+
 unidic
 korean-romanizer==0.28.0
 pinyin-jyutping==0.9
