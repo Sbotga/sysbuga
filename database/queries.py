@@ -9,6 +9,8 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "default_region": "en",
     "mirror_charts_by_default": False,
     "default_difficulty": "master",
+    # activity-only (not surfaced in /user settings; set from the activity UI)
+    "activity_theme": "dark",
 }
 
 GUESS_DEFAULT = {"fail": 0, "success": 0, "ragequit": 0, "hint": 0}

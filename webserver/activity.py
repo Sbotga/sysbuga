@@ -42,15 +42,7 @@ router = APIRouter(prefix="/api/activity")
 _rounds: dict[str, dict[str, Any]] = {}  # round_id -> round
 _user_rounds: dict[int, str] = {}  # user_id -> active round_id
 _token_cache: dict[str, tuple[int, float]] = {}  # bearer -> (user_id, cached_at)
-_staged_launches: dict[str, tuple[str | None, float]] = {}  # instance_id -> (mode, at)
 TOKEN_CACHE_TTL = 600
-STAGED_TTL = 600
-
-
-def stage_launch(instance_id: str, mode: str | None) -> None:
-    """Remember what /activity guess launched: keyed by the activity instance
-    the interaction created, so a later normal launch is unaffected."""
-    _staged_launches[instance_id] = (mode, time.time())
 
 
 class StartBody(BaseModel):
@@ -60,6 +52,14 @@ class StartBody(BaseModel):
 class SubmitBody(BaseModel):
     round_id: str
     guess: str
+
+
+class RoundBody(BaseModel):
+    round_id: str
+
+
+class ThemeBody(BaseModel):
+    theme: str
 
 
 async def _resolve_user(authorization: str | None) -> int:
@@ -82,14 +82,30 @@ async def _resolve_user(authorization: str | None) -> int:
     return user_id
 
 
+def _finish(round_id: str, user_id: int) -> None:
+    """End the active round but keep it briefly so the reveal image can load."""
+    _user_rounds.pop(user_id, None)
+    data = _rounds.get(round_id)
+    if data:
+        data["finished"] = True
+        data["reveal_until"] = time.time() + 120
+
+
+async def _safe_fetch(url: str) -> bytes | None:
+    try:
+        return await _fetch_bytes(url)
+    except Exception:
+        return None
+
+
 def _prune() -> None:
     now = time.time()
-    for rid in [r for r, data in _rounds.items() if data["expires_at"] + 300 < now]:
-        _rounds.pop(rid, None)
+    for rid, data in list(_rounds.items()):
+        keep_until = data.get("reveal_until", data["expires_at"] + 300)
+        if keep_until < now:
+            _rounds.pop(rid, None)
     for uid in [u for u, r in _user_rounds.items() if r not in _rounds]:
         _user_rounds.pop(uid, None)
-    for iid in [i for i, (_, at) in _staged_launches.items() if at + STAGED_TTL < now]:
-        _staged_launches.pop(iid, None)
 
 
 async def _build_round(bot: SbugaBot, mode: str) -> dict[str, Any] | None:
@@ -97,7 +113,12 @@ async def _build_round(bot: SbugaBot, mode: str) -> dict[str, Any] | None:
     pjsk = bot.pjsk
     assert pjsk is not None
     now_ms = int(time.time() * 1000)
-    round_data: dict[str, Any] = {"mode": mode, "prompt": None, "image": None}
+    round_data: dict[str, Any] = {
+        "mode": mode,
+        "prompt": None,
+        "image": None,
+        "reveal": None,
+    }
 
     if mode in (
         "jacket",
@@ -120,6 +141,9 @@ async def _build_round(bot: SbugaBot, mode: str) -> dict[str, Any] | None:
         round_data["type"] = "song"
         round_data["answer_id"] = music.id
         round_data["answer_name"] = music.title
+
+        jacket = await _safe_fetch(music.jacket_url)
+        round_data["reveal"] = jacket  # full jacket shown on reveal, all song modes
 
         if mode == "notes":
             master = next(
@@ -145,7 +169,6 @@ async def _build_round(bot: SbugaBot, mode: str) -> dict[str, Any] | None:
             ).getvalue()
             return round_data
 
-        jacket = await _fetch_bytes(music.jacket_url)
         if not jacket:
             return None
         size, bw = 140, False
@@ -186,6 +209,7 @@ async def _build_round(bot: SbugaBot, mode: str) -> dict[str, Any] | None:
         round_data["type"] = "character"
         round_data["answer_id"] = char.id
         round_data["answer_name"] = character_display_name(char)
+        round_data["reveal"] = art
         round_data["image"] = (
             await unblock.to_process_with_timeout(
                 _crop_square, art, 250, mode == "character_bw"
@@ -209,6 +233,7 @@ async def _build_round(bot: SbugaBot, mode: str) -> dict[str, Any] | None:
         round_data["type"] = "event"
         round_data["answer_id"] = event.id
         round_data["answer_name"] = event.name
+        round_data["reveal"] = bg
         round_data["image"] = (
             await unblock.to_process_with_timeout(_crop_square, bg, 250, False)
         ).getvalue()
@@ -230,24 +255,39 @@ def _match(bot: SbugaBot, round_data: dict[str, Any], guess: str):
     return (event.id, event.name) if event else None
 
 
+@router.get("/settings")
+async def get_settings(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    bot: SbugaBot = request.app.state.bot
+    user_id = await _resolve_user(authorization)
+    theme = "dark"
+    if bot.user_data:
+        theme = await bot.user_data.get_settings(user_id, "activity_theme")
+    return {"theme": theme}
+
+
+@router.post("/settings")
+async def save_settings(
+    request: Request,
+    body: ThemeBody,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    bot: SbugaBot = request.app.state.bot
+    user_id = await _resolve_user(authorization)
+    theme = body.theme if body.theme in ("dark", "light") else "dark"
+    if bot.user_data:
+        await bot.user_data.change_settings(user_id, "activity_theme", theme)
+    return {"theme": theme}
+
+
 @router.get("/modes")
 async def modes() -> list[dict[str, Any]]:
     return [
         {"value": value, "label": label, "seconds": MODE_TIME.get(value, GUESS_TIME)}
         for value, label in MODES.items()
     ]
-
-
-@router.get("/pending")
-async def pending_launch(
-    instance_id: str,
-    authorization: str | None = Header(default=None),
-) -> dict[str, Any]:
-    await _resolve_user(authorization)
-    staged = _staged_launches.pop(instance_id, None)
-    if staged and staged[1] + STAGED_TTL > time.time():
-        return {"staged": True, "mode": staged[0]}
-    return {"staged": False, "mode": None}
 
 
 @router.post("/guess/start")
@@ -281,6 +321,7 @@ async def start_round(
         "type": round_data["type"],
         "prompt": round_data["prompt"],
         "has_image": round_data["image"] is not None,
+        "has_reveal": round_data["reveal"] is not None,
         "expires_at": round_data["expires_at"],
     }
 
@@ -293,6 +334,50 @@ async def round_image(round_id: str) -> Response:
     return Response(content=round_data["image"], media_type="image/png")
 
 
+@router.get("/guess/round/{round_id}/reveal")
+async def round_reveal(round_id: str) -> Response:
+    round_data = _rounds.get(round_id)
+    if not round_data or not round_data.get("reveal"):
+        raise HTTPException(status_code=404, detail="not found")
+    return Response(content=round_data["reveal"], media_type="image/png")
+
+
+@router.post("/guess/hint")
+async def hint(
+    request: Request,
+    body: RoundBody,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    bot: SbugaBot = request.app.state.bot
+    user_id = await _resolve_user(authorization)
+    round_data = _rounds.get(body.round_id)
+    if not round_data or round_data["user_id"] != user_id or round_data.get("finished"):
+        raise HTTPException(status_code=404, detail="no active round")
+    name = str(round_data["answer_name"])
+    masked = name[0] + "".join("_" if c != " " else " " for c in name[1:])
+    if bot.user_data:
+        await bot.user_data.add_guesses(user_id, round_data["mode"], "hint")
+    return {"hint": masked, "length": len(name)}
+
+
+@router.post("/guess/reveal")
+async def reveal_answer(
+    body: RoundBody,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """End a round without a correct guess (timer ran out). No stat recorded,
+    matching chat guessing where timeouts don't count."""
+    user_id = await _resolve_user(authorization)
+    round_data = _rounds.get(body.round_id)
+    if not round_data or round_data["user_id"] != user_id:
+        raise HTTPException(status_code=404, detail="no active round")
+    _finish(body.round_id, user_id)
+    return {
+        "answer": round_data["answer_name"],
+        "has_reveal": round_data["reveal"] is not None,
+    }
+
+
 @router.post("/guess/submit")
 async def submit_guess(
     request: Request,
@@ -302,23 +387,29 @@ async def submit_guess(
     bot: SbugaBot = request.app.state.bot
     user_id = await _resolve_user(authorization)
     round_data = _rounds.get(body.round_id)
-    if not round_data or round_data["user_id"] != user_id:
+    if not round_data or round_data["user_id"] != user_id or round_data.get("finished"):
         raise HTTPException(status_code=404, detail="no active round")
 
     if time.time() > round_data["expires_at"]:
-        _rounds.pop(body.round_id, None)
-        _user_rounds.pop(user_id, None)
-        return {"result": "expired", "answer": round_data["answer_name"]}
+        _finish(body.round_id, user_id)
+        return {
+            "result": "expired",
+            "answer": round_data["answer_name"],
+            "has_reveal": round_data["reveal"] is not None,
+        }
 
     matched = _match(bot, round_data, body.guess)
     if matched is None:
         return {"result": "not_found"}
     if matched[0] == round_data["answer_id"]:
-        _rounds.pop(body.round_id, None)
-        _user_rounds.pop(user_id, None)
+        _finish(body.round_id, user_id)
         if bot.user_data:
             await bot.user_data.add_guesses(user_id, round_data["mode"], "success")
-        return {"result": "correct", "answer": round_data["answer_name"]}
+        return {
+            "result": "correct",
+            "answer": round_data["answer_name"],
+            "has_reveal": round_data["reveal"] is not None,
+        }
     if bot.user_data:
         await bot.user_data.add_guesses(user_id, round_data["mode"], "fail")
     return {"result": "incorrect", "matched": matched[1]}

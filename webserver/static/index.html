@@ -2,11 +2,14 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>SYSbuga</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <canvas id="rain"></canvas>
+  <button id="btn-theme" aria-label="Toggle theme" title="Toggle light/dark" hidden>🌙</button>
+
   <main id="app">
     <section id="screen-loading" class="screen active">
       <h1 id="app-name">SYSbuga</h1>
@@ -16,34 +19,47 @@
     <section id="screen-home" class="screen">
       <h1>SYSbuga</h1>
       <p class="sub">Pick an activity</p>
-      <button id="btn-guessing" class="big">Guessing</button>
+      <button id="btn-guessing" class="big">🎧 Guessing</button>
     </section>
 
     <section id="screen-setup" class="screen">
+      <button class="back" data-target="home" aria-label="Back">←</button>
       <h2>Guessing</h2>
-      <label for="mode-select">Mode</label>
+      <p class="sub">Choose a mode</p>
       <select id="mode-select"></select>
       <button id="btn-start" class="big">Start</button>
-      <button id="btn-back-home" class="link">← back</button>
     </section>
 
-    <section id="screen-round" class="screen">
-      <div class="round-head">
-        <h2 id="round-mode"></h2>
-        <span id="round-timer"></span>
-      </div>
+    <section id="screen-round" class="screen wide">
+      <header class="round-header">
+        <button id="btn-quit" class="icon-btn" aria-label="Back">←</button>
+        <span id="round-mode" class="round-title"></span>
+        <button id="btn-hint" class="icon-btn" aria-label="Hint" title="Hint">💡</button>
+      </header>
+      <span id="round-timer" class="timer" hidden></span>
       <p id="round-prompt" class="prompt"></p>
-      <img id="round-image" alt="" hidden />
+      <div id="round-image-wrap"><img id="round-image" alt="" hidden /></div>
       <form id="guess-form">
         <input id="guess-input" type="text" autocomplete="off"
-               placeholder="Type your guess…" maxlength="200" />
-        <button type="submit">Guess</button>
+               autocapitalize="off" placeholder="Type your guess…" maxlength="200" />
+        <button type="submit" id="guess-submit">Guess</button>
       </form>
       <p id="round-result"></p>
+      <ul id="guess-log"></ul>
       <button id="btn-again" class="big" hidden>Play again</button>
-      <button id="btn-back-setup" class="link">← back</button>
     </section>
   </main>
+
+  <div id="modal" class="modal" hidden>
+    <div class="modal-card">
+      <p id="modal-text"></p>
+      <div class="modal-actions">
+        <button id="modal-cancel" class="ghost"></button>
+        <button id="modal-confirm"></button>
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="app.js"></script>
 </body>
 </html>

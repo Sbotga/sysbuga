@@ -1,4 +1,5 @@
 import { DiscordSDK } from "./vendor/discord-sdk.js";
+import { startRain, startTrail } from "./sbuga.js";
 
 // Inside the activity iframe all XHR/fetch goes through Discord's proxy
 // prefix; hit directly (testing), the server has no such prefix.
@@ -8,8 +9,10 @@ const EMBEDDED =
 const API = EMBEDDED ? "/.proxy" : "";
 
 let accessToken = null;
-let currentRound = null;
+let currentMode = null;
+let currentRound = null; // active (unfinished) round, else null
 let timerHandle = null;
+let theme = "dark";
 
 const $ = (id) => document.getElementById(id);
 
@@ -36,6 +39,45 @@ async function api(path, options = {}) {
   }
   return resp.json();
 }
+
+// --- confirm modal ---
+
+function confirmModal(text, confirmText = "Confirm", cancelText = "Cancel") {
+  $("modal-text").textContent = text;
+  $("modal-confirm").textContent = confirmText;
+  $("modal-cancel").textContent = cancelText;
+  $("modal").hidden = false;
+  return new Promise((resolve) => {
+    const done = (val) => {
+      $("modal").hidden = true;
+      $("modal-confirm").onclick = null;
+      $("modal-cancel").onclick = null;
+      resolve(val);
+    };
+    $("modal-confirm").onclick = () => done(true);
+    $("modal-cancel").onclick = () => done(false);
+  });
+}
+
+// --- theme ---
+
+function applyTheme() {
+  document.body.classList.toggle("light", theme === "light");
+  $("btn-theme").textContent = theme === "light" ? "☀️" : "🌙";
+}
+
+async function toggleTheme() {
+  theme = theme === "light" ? "dark" : "light";
+  applyTheme();
+  try {
+    await api("/api/activity/settings", {
+      method: "POST",
+      body: JSON.stringify({ theme }),
+    });
+  } catch {}
+}
+
+// --- boot / auth ---
 
 async function boot() {
   const config = await api("/api/config");
@@ -67,38 +109,26 @@ async function boot() {
   accessToken = token.access_token;
   await sdk.commands.authenticate({ access_token: accessToken });
 
+  try {
+    const settings = await api("/api/activity/settings");
+    theme = settings.theme === "light" ? "light" : "dark";
+  } catch {}
+  applyTheme();
+  $("btn-theme").hidden = false;
+
   const modes = await api("/api/activity/modes");
   const select = $("mode-select");
   for (const mode of modes) {
     const option = document.createElement("option");
     option.value = mode.value;
-    option.textContent = `${mode.label} (${mode.seconds}s)`;
+    option.textContent = mode.label;
     select.appendChild(option);
-  }
-
-  // Launched via /activity guess? The staged entry is keyed to this exact
-  // activity instance, so normal launches are unaffected.
-  const pending = await api(
-    `/api/activity/pending?instance_id=${encodeURIComponent(sdk.instanceId)}`
-  );
-  if (pending.staged) {
-    if (pending.mode && [...select.options].some((o) => o.value === pending.mode)) {
-      select.value = pending.mode;
-      await startRound();
-    } else {
-      show("setup");
-    }
-    return;
   }
 
   show("home");
 }
 
-function setResult(text, cls) {
-  const el = $("round-result");
-  el.textContent = text;
-  el.className = cls || "";
-}
+// --- round ---
 
 function stopTimer() {
   if (timerHandle) clearInterval(timerHandle);
@@ -107,59 +137,97 @@ function stopTimer() {
 
 function startTimer(expiresAt) {
   stopTimer();
+  const el = $("round-timer");
+  el.hidden = false;
   const tick = () => {
     const left = Math.max(0, expiresAt - Date.now() / 1000);
-    const el = $("round-timer");
     el.textContent = `${Math.ceil(left)}s`;
     el.classList.toggle("low", left <= 10);
     if (left <= 0) {
       stopTimer();
-      endRound(`Time's up!`, "bad");
+      timeUp();
     }
   };
   tick();
   timerHandle = setInterval(tick, 250);
 }
 
-function endRound(message, cls) {
-  stopTimer();
-  currentRound = null;
-  setResult(message, cls);
-  $("guess-form").hidden = true;
-  $("btn-again").hidden = false;
+function setResult(text, cls) {
+  const el = $("round-result");
+  el.textContent = text;
+  el.className = cls || "";
 }
 
-async function startRound() {
-  const mode = $("mode-select").value;
-  setResult("");
-  $("guess-form").hidden = false;
-  $("btn-again").hidden = true;
-  $("round-image").hidden = true;
-  $("round-prompt").textContent = "Loading…";
-  show("round");
-  $("round-mode").textContent = $("mode-select").selectedOptions[0].textContent;
+function setFormEnabled(on) {
+  $("guess-input").disabled = !on;
+  $("guess-submit").disabled = !on;
+  $("btn-hint").disabled = !on;
+}
 
+function logEntry(icon, text, cls) {
+  const li = document.createElement("li");
+  li.className = cls;
+  li.innerHTML = `<span class="icon"></span><span class="text"></span>`;
+  li.querySelector(".icon").textContent = icon;
+  li.querySelector(".text").textContent = text;
+  const log = $("guess-log");
+  log.prepend(li);
+}
+
+async function startRound(mode) {
+  currentMode = mode;
+  currentRound = null;
+  show("round");
+  const label = [...$("mode-select").options].find((o) => o.value === mode);
+  $("round-mode").textContent = label ? label.textContent : "Guess";
+  setResult("");
+  $("guess-log").innerHTML = "";
+  $("btn-again").hidden = true;
+  $("guess-form").hidden = false;
+  $("round-image").hidden = true;
+  $("round-timer").hidden = true; // no timer while loading
+  $("round-prompt").textContent = "Loading…";
+  $("guess-input").value = "";
+  setFormEnabled(false); // guess bar disabled while loading
+
+  let round;
   try {
-    currentRound = await api("/api/activity/guess/start", {
+    round = await api("/api/activity/guess/start", {
       method: "POST",
       body: JSON.stringify({ mode }),
     });
   } catch (e) {
     $("round-prompt").textContent = `Couldn't start: ${e.message}`;
-    $("btn-again").hidden = false;
     $("guess-form").hidden = true;
+    $("btn-again").hidden = false;
     return;
   }
 
-  $("round-prompt").textContent = currentRound.prompt || "";
-  if (currentRound.has_image) {
+  currentRound = round;
+  $("round-prompt").textContent = round.prompt || "";
+  if (round.has_image) {
     const img = $("round-image");
-    img.src = `${API}/api/activity/guess/round/${currentRound.round_id}/image`;
+    img.src = `${API}/api/activity/guess/round/${round.round_id}/image`;
     img.hidden = false;
   }
-  $("guess-input").value = "";
+  setFormEnabled(true);
   $("guess-input").focus();
-  startTimer(currentRound.expires_at);
+  startTimer(round.expires_at);
+}
+
+function showReveal(round, message, cls) {
+  stopTimer();
+  currentRound = null;
+  $("round-timer").hidden = true;
+  setResult(message, cls);
+  $("guess-form").hidden = true;
+  $("btn-hint").disabled = true;
+  $("btn-again").hidden = false;
+  if (round.has_reveal) {
+    const img = $("round-image");
+    img.src = `${API}/api/activity/guess/round/${round.round_id}/reveal`;
+    img.hidden = false;
+  }
 }
 
 async function submitGuess(event) {
@@ -180,29 +248,72 @@ async function submitGuess(event) {
   }
 
   if (result.result === "correct") {
-    endRound(`Correct! It was ${result.answer}.`, "good");
+    logEntry("✅", guess, "right");
+    showReveal({ ...currentRound, ...result }, `Correct! It was ${result.answer}.`, "good");
   } else if (result.result === "expired") {
-    endRound(`Time's up! It was ${result.answer}.`, "bad");
+    showReveal({ ...currentRound, ...result }, `Time's up! It was ${result.answer}.`, "bad");
   } else if (result.result === "incorrect") {
-    setResult(`Incorrect: ${result.matched}`, "bad");
-    $("guess-input").select();
+    logEntry("❌", result.matched, "wrong");
+    $("guess-input").value = "";
+    $("guess-input").focus();
   } else {
-    setResult("Couldn't find anything matching that.", "bad");
+    logEntry("❔", guess, "miss");
     $("guess-input").select();
   }
 }
 
-$("btn-guessing").addEventListener("click", () => show("setup"));
-$("btn-back-home").addEventListener("click", () => show("home"));
-$("btn-start").addEventListener("click", startRound);
-$("btn-again").addEventListener("click", () => show("setup"));
-$("btn-back-setup").addEventListener("click", () => {
-  stopTimer();
-  currentRound = null;
-  show("setup");
-});
-$("guess-form").addEventListener("submit", submitGuess);
+async function timeUp() {
+  if (!currentRound) return;
+  const round = currentRound;
+  try {
+    const res = await api("/api/activity/guess/reveal", {
+      method: "POST",
+      body: JSON.stringify({ round_id: round.round_id }),
+    });
+    showReveal({ ...round, ...res }, `Time's up! It was ${res.answer}.`, "bad");
+  } catch {
+    showReveal(round, "Time's up!", "bad");
+  }
+}
 
+async function useHint() {
+  if (!currentRound) return;
+  if (!(await confirmModal("Use a hint?", "Show hint", "Cancel"))) return;
+  if (!currentRound) return;
+  try {
+    const res = await api("/api/activity/guess/hint", {
+      method: "POST",
+      body: JSON.stringify({ round_id: currentRound.round_id }),
+    });
+    logEntry("💡", `${res.hint}  (${res.length} chars)`, "hint");
+  } catch (e) {
+    setResult(e.message, "bad");
+  }
+}
+
+// --- wiring ---
+
+$("btn-guessing").addEventListener("click", () => show("setup"));
+document
+  .querySelectorAll(".back[data-target]")
+  .forEach((b) => b.addEventListener("click", () => show(b.dataset.target)));
+$("btn-start").addEventListener("click", () => startRound($("mode-select").value));
+$("btn-again").addEventListener("click", () => startRound(currentMode));
+$("guess-form").addEventListener("submit", submitGuess);
+$("btn-hint").addEventListener("click", useHint);
+$("btn-theme").addEventListener("click", toggleTheme);
+
+$("btn-quit").addEventListener("click", async () => {
+  if (!currentRound) return show("setup"); // already revealed
+  if (await confirmModal("Quit this round?", "Quit", "Keep playing")) {
+    stopTimer();
+    currentRound = null;
+    show("setup");
+  }
+});
+
+startRain($("rain"));
+startTrail();
 boot().catch((e) => {
   $("loading-text").textContent = `Failed to connect: ${e.message}`;
 });
