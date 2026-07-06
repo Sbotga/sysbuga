@@ -307,7 +307,14 @@ class PJSKData:
                     # keep old data and old version so the region retries next poll
                     new_music[r] = self._music_cache.get(r, [])
                     versions[r] = self._versions.get(r, "")
-                    print(f"[PJSKData] /musics failed for {r} — keeping cached data")
+                    reason = (
+                        repr(res)[:300]
+                        if isinstance(res, BaseException)
+                        else "empty response"
+                    )
+                    print(
+                        f"[PJSKData] /musics failed for {r} — keeping cached data ({reason})"
+                    )
             if not any(new_music.values()):
                 print("[PJSKData] no music received, skipping")
                 return False

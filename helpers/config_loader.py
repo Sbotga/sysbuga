@@ -26,6 +26,7 @@ class ConfigAPI(TypedDict):
     enabled: bool
     host: str
     port: int
+    url: str
 
 
 class ConfigPSQL(TypedDict):

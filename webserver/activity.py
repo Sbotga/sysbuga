@@ -42,7 +42,15 @@ router = APIRouter(prefix="/api/activity")
 _rounds: dict[str, dict[str, Any]] = {}  # round_id -> round
 _user_rounds: dict[int, str] = {}  # user_id -> active round_id
 _token_cache: dict[str, tuple[int, float]] = {}  # bearer -> (user_id, cached_at)
+_pending_modes: dict[int, tuple[str, float]] = {}  # user_id -> (mode, staged_at)
 TOKEN_CACHE_TTL = 600
+PENDING_MODE_TTL = 120
+
+
+def set_pending_mode(user_id: int, mode: str) -> None:
+    """Stage a mode for a user about to launch the activity (from /activity
+    guess), so the frontend can skip straight into a round."""
+    _pending_modes[user_id] = (mode, time.time())
 
 
 class StartBody(BaseModel):
@@ -226,6 +234,17 @@ async def modes() -> list[dict[str, Any]]:
         {"value": value, "label": label, "seconds": MODE_TIME.get(value, GUESS_TIME)}
         for value, label in MODES.items()
     ]
+
+
+@router.get("/pending")
+async def pending_mode(
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    user_id = await _resolve_user(authorization)
+    staged = _pending_modes.pop(user_id, None)
+    if staged and staged[1] + PENDING_MODE_TTL > time.time():
+        return {"mode": staged[0]}
+    return {"mode": None}
 
 
 @router.post("/guess/start")

@@ -1,7 +1,11 @@
 import { DiscordSDK } from "./vendor/discord-sdk.js";
 
-// All XHR/fetch inside an activity must go through Discord's proxy prefix.
-const API = "/.proxy";
+// Inside the activity iframe all XHR/fetch goes through Discord's proxy
+// prefix; hit directly (testing), the server has no such prefix.
+const EMBEDDED =
+  location.hostname.endsWith("discordsays.com") ||
+  new URLSearchParams(location.search).has("frame_id");
+const API = EMBEDDED ? "/.proxy" : "";
 
 let accessToken = null;
 let currentRound = null;
@@ -41,6 +45,12 @@ async function boot() {
     document.querySelector("#screen-home h1").textContent = config.name;
   }
 
+  if (!EMBEDDED) {
+    $("loading-text").textContent =
+      "Server is up! Open this as an activity inside Discord to play.";
+    return;
+  }
+
   const sdk = new DiscordSDK(config.client_id);
   await sdk.ready();
   const { code } = await sdk.commands.authorize({
@@ -64,6 +74,14 @@ async function boot() {
     option.value = mode.value;
     option.textContent = `${mode.label} (${mode.seconds}s)`;
     select.appendChild(option);
+  }
+
+  // /activity guess staged a mode — jump straight into a round.
+  const pending = await api("/api/activity/pending");
+  if (pending.mode && [...select.options].some((o) => o.value === pending.mode)) {
+    select.value = pending.mode;
+    await startRound();
+    return;
   }
 
   show("home");

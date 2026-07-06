@@ -4,6 +4,7 @@ import traceback
 from typing import TYPE_CHECKING
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from helpers import embeds
@@ -61,10 +62,24 @@ class DevCog(commands.Cog):
             self.bot.app_commands.extend(cmds)
             await msg.edit(content=f"Synced {len(cmds)} commands to guild {guild}.")
         else:
-            self.bot.app_commands = await self.bot.tree.sync()
+            self.bot.app_commands = await self._sync_global()
             await msg.edit(
                 content=f"Synced {len(self.bot.app_commands)} global commands."
             )
+
+    async def _sync_global(self) -> list[app_commands.AppCommand]:
+        """tree.sync(), but keeping the activity's Entry Point command — bulk
+        updates are not allowed to drop it (error 50240) and the tree doesn't
+        know about it."""
+        tree = self.bot.tree
+        app_id = self.bot.application_id
+        assert app_id is not None
+        existing = await self.bot.http.get_global_commands(app_id)
+        entry_points = [c for c in existing if c.get("type") == 4]
+        payload = [c.to_dict(tree) for c in tree._get_all_commands(guild=None)]
+        payload.extend(entry_points)  # type: ignore[arg-type]  # TypedDict vs Dict
+        data = await self.bot.http.bulk_upsert_global_commands(app_id, payload=payload)
+        return [app_commands.AppCommand(data=d, state=tree._state) for d in data]
 
     @commands.command()
     async def reload(self, ctx: commands.Context, cog: str) -> None:

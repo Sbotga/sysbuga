@@ -34,6 +34,9 @@ async def _exchange_code(bot: SbugaBot, code: str) -> dict[str, Any]:
         "grant_type": "authorization_code",
         "code": code,
     }
+    redirect_uri = bot.config.get("api", {}).get("url", "")
+    if redirect_uri:
+        data["redirect_uri"] = redirect_uri
     async with aiohttp.ClientSession() as session:
         async with session.post(
             f"{DISCORD_API}/oauth2/token",
