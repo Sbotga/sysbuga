@@ -79,7 +79,10 @@ async function toggleTheme() {
 
 // --- boot / auth ---
 
+const status = (t) => ($("loading-text").textContent = t);
+
 async function boot() {
+  status("Contacting server…");
   const config = await api("/api/config");
   if (config.name) {
     document.title = config.name;
@@ -88,20 +91,27 @@ async function boot() {
   }
 
   if (!EMBEDDED) {
-    $("loading-text").textContent =
-      "Server is up! Open this as an activity inside Discord to play.";
+    status("Server is up! Open this as an activity inside Discord to play.");
+    return;
+  }
+  if (!config.client_id) {
+    status("Server isn't configured yet (no client id).");
     return;
   }
 
+  status("Handshaking with Discord…");
   const sdk = new DiscordSDK(config.client_id);
   await sdk.ready();
+
+  status("Authorizing…");
   const { code } = await sdk.commands.authorize({
     client_id: config.client_id,
     response_type: "code",
     state: "",
-    prompt: "none",
     scope: ["identify"],
   });
+
+  status("Signing in…");
   const token = await api("/api/oauth/token", {
     method: "POST",
     body: JSON.stringify({ code }),
@@ -109,6 +119,7 @@ async function boot() {
   accessToken = token.access_token;
   await sdk.commands.authenticate({ access_token: accessToken });
 
+  status("Loading…");
   try {
     const settings = await api("/api/activity/settings");
     theme = settings.theme === "light" ? "light" : "dark";
@@ -312,8 +323,14 @@ $("btn-quit").addEventListener("click", async () => {
   }
 });
 
-startRain($("rain"));
-startTrail();
+// cosmetic — must never block the boot flow
+try {
+  startRain($("rain"));
+  startTrail();
+} catch (e) {
+  console.error("sbuga fx failed", e);
+}
+
 boot().catch((e) => {
-  $("loading-text").textContent = `Failed to connect: ${e.message}`;
+  status(`Failed to connect: ${e.message}`);
 });

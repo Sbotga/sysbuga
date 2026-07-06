@@ -193,11 +193,14 @@ class SbugaClient:
         *,
         mirrored: bool = False,
     ) -> bytes:
+        # The endpoint 302-redirects un-mirrored charts to R2 (aiohttp follows
+        # it transparently) and applies the flip itself for mirrored ones.
         return await self._get_bytes(
             "/tools/chart_viewer",
             music_id=music_id,
             difficulty=difficulty,
             region=region,
+            image_type=self.image_type,
             mirrored=str(mirrored).lower(),
         )
 

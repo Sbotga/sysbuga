@@ -68,13 +68,14 @@ body.light #btn-theme:hover { background: rgba(0, 0, 0, 0.16); }
 .sbuga-trail.fade { opacity: 0; transform: scale(0.4); }
 
 #app {
-  position: relative;
+  position: fixed;
+  inset: 0;
   z-index: 1;
-  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 16px;
+  overflow-y: auto;
 }
 
 .screen {
@@ -84,6 +85,9 @@ body.light #btn-theme:hover { background: rgba(0, 0, 0, 0.16); }
   gap: 16px;
   text-align: center;
   width: min(460px, 100%);
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  margin: auto;
   padding: 28px 22px;
   border-radius: 18px;
   background: rgba(20, 21, 34, 0.72);
