@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SYSbuga</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main id="app">
+    <section id="screen-loading" class="screen active">
+      <h1 id="app-name">SYSbuga</h1>
+      <p id="loading-text">Connecting…</p>
+    </section>
+
+    <section id="screen-home" class="screen">
+      <h1>SYSbuga</h1>
+      <p class="sub">Pick an activity</p>
+      <button id="btn-guessing" class="big">Guessing</button>
+    </section>
+
+    <section id="screen-setup" class="screen">
+      <h2>Guessing</h2>
+      <label for="mode-select">Mode</label>
+      <select id="mode-select"></select>
+      <button id="btn-start" class="big">Start</button>
+      <button id="btn-back-home" class="link">← back</button>
+    </section>
+
+    <section id="screen-round" class="screen">
+      <div class="round-head">
+        <h2 id="round-mode"></h2>
+        <span id="round-timer"></span>
+      </div>
+      <p id="round-prompt" class="prompt"></p>
+      <img id="round-image" alt="" hidden />
+      <form id="guess-form">
+        <input id="guess-input" type="text" autocomplete="off"
+               placeholder="Type your guess…" maxlength="200" />
+        <button type="submit">Guess</button>
+      </form>
+      <p id="round-result"></p>
+      <button id="btn-again" class="big" hidden>Play again</button>
+      <button id="btn-back-setup" class="link">← back</button>
+    </section>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

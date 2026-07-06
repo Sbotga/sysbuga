@@ -1,0 +1,426 @@
+import asyncio
+import json
+import os
+from functools import partial
+
+from data import masterdata, search
+from data.models import Card, Character, CheerfulCarnivalTeam, Event, Gacha, Music
+from helpers.emojis import emojis
+from services.sbuga import Region, SbugaClient, SbugaError
+
+MUSIC_CACHE_FILE = "cache/music_data.json"
+EVENT_CACHE_FILE = "cache/event_data.json"
+EXTRA_CACHE_FILE = "cache/extra_data.json"
+
+RARITY_DISPLAY = {
+    "rarity_1": "1☆",
+    "rarity_2": "2☆",
+    "rarity_3": "3☆",
+    "rarity_4": "4☆",
+    "rarity_birthday": "🎀",
+}
+
+
+def character_display_name(char: Character) -> str:
+    if not char.first_name:
+        return char.given_name.title()
+    sep = "" if any("　" <= c <= "鿿" for c in char.given_name) else " "
+    if char.unit == "piapro":
+        return f"{char.first_name}{sep}{char.given_name}".title()
+    return f"{char.given_name}{sep}{char.first_name}".title()
+
+
+class PJSKData:
+    def __init__(
+        self,
+        client: SbugaClient,
+        regions: list[str],
+        *,
+        refresh_interval: int = 300,
+        asset_base_url: str = "",
+    ) -> None:
+        self.client = client
+        self.regions: list[Region] = [r for r in regions]  # type: ignore[list-item]
+        self.refresh_interval = refresh_interval
+        self.asset_base_url = asset_base_url.rstrip("/")
+        self._music_cache: dict[str, list[Music]] = {}
+        self._event_cache: dict[str, list[Event]] = {}
+        self._characters: list[Character] = []
+        self._cc_teams: list[CheerfulCarnivalTeam] = []
+        self._cards: list[Card] = []
+        self._gacha_cache: dict[str, list[Gacha]] = {}
+        self._versions: dict[str, str] = {}
+        self._lock = asyncio.Lock()
+        self._task: asyncio.Task | None = None
+
+    # tw/kr assets are not extracted/uploaded (subset of jp, same bundle
+    # names) — point their asset URLs at the jp tree instead.
+    ASSET_REGION = {"tw": "jp", "kr": "jp"}
+
+    def _asset_url(self, region: str, path: str) -> str:
+        """R2 URL when configured, otherwise the API's /assets passthrough."""
+        region = self.ASSET_REGION.get(region, region)
+        full = f"{path}.{self.client.image_type}"
+        if self.asset_base_url:
+            return f"{self.asset_base_url}/pjsk_data/{region}/{full}"
+        return self.client.asset_url(full, region)  # type: ignore[arg-type]
+
+    # --- disk ---
+
+    @staticmethod
+    def _ensure_dirs() -> None:
+        os.makedirs("cache", exist_ok=True)
+
+    def _load_from_disk(self) -> None:
+        self._ensure_dirs()
+        if os.path.exists(MUSIC_CACHE_FILE):
+            try:
+                with open(MUSIC_CACHE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self._versions = data.get("versions", {})
+                self._music_cache = {
+                    r: [Music.model_validate(m) for m in data.get(r, [])]
+                    for r in self.regions
+                }
+                print(
+                    "[PJSKData] loaded music from disk "
+                    + " ".join(
+                        f"{r}={len(self._music_cache.get(r, []))}" for r in self.regions
+                    )
+                )
+            except Exception as e:
+                print(f"[PJSKData] failed to load music from disk: {e}")
+        if os.path.exists(EVENT_CACHE_FILE):
+            try:
+                with open(EVENT_CACHE_FILE, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                self._event_cache = {
+                    r: [Event.model_validate(e) for e in raw.get(r, [])]
+                    for r in self.regions
+                }
+            except Exception as e:
+                print(f"[PJSKData] failed to load events from disk: {e}")
+        if os.path.exists(EXTRA_CACHE_FILE):
+            try:
+                with open(EXTRA_CACHE_FILE, "r", encoding="utf-8") as f:
+                    extra = json.load(f)
+                self._characters = [
+                    Character.model_validate(c) for c in extra.get("characters", [])
+                ]
+                self._cc_teams = [
+                    CheerfulCarnivalTeam.model_validate(t)
+                    for t in extra.get("cc_teams", [])
+                ]
+                self._cards = [Card.model_validate(c) for c in extra.get("cards", [])]
+                self._gacha_cache = {
+                    r: [Gacha.model_validate(g) for g in region_gachas]
+                    for r, region_gachas in extra.get("gachas", {}).items()
+                }
+            except Exception as e:
+                print(f"[PJSKData] failed to load extras from disk: {e}")
+
+    def _save_music(self) -> None:
+        self._ensure_dirs()
+        payload: dict = {"versions": self._versions}
+        for r in self.regions:
+            payload[r] = [m.model_dump() for m in self._music_cache.get(r, [])]
+        with open(MUSIC_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+
+    def _save_events(self) -> None:
+        self._ensure_dirs()
+        payload = {
+            r: [e.model_dump() for e in self._event_cache.get(r, [])]
+            for r in self.regions
+        }
+        with open(EVENT_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+
+    def _save_extras(self) -> None:
+        self._ensure_dirs()
+        payload = {
+            "characters": [c.model_dump() for c in self._characters],
+            "cc_teams": [t.model_dump() for t in self._cc_teams],
+            "cards": [c.model_dump() for c in self._cards],
+            "gachas": {
+                r: [g.model_dump() for g in region_gachas]
+                for r, region_gachas in self._gacha_cache.items()
+            },
+        }
+        with open(EXTRA_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+
+    # --- merge helpers (first region in priority order wins) ---
+
+    def _merged_music(self) -> dict[int, Music]:
+        merged: dict[int, Music] = {}
+        for r in reversed(self.regions):
+            for m in self._music_cache.get(r, []):
+                merged[m.id] = m
+        return merged
+
+    def _merged_events(self) -> dict[int, Event]:
+        merged: dict[int, Event] = {}
+        for r in reversed(self.regions):
+            for e in self._event_cache.get(r, []):
+                merged[e.id] = e
+        return merged
+
+    def _all_region_events(self) -> list[Event]:
+        """Every region's event objects (same ids repeat) so the search map
+        gets every region's localized names, not just the merge winner's."""
+        return [e for events in self._event_cache.values() for e in events]
+
+    # --- public accessors ---
+
+    def musics(self) -> list[Music]:
+        return list(self._merged_music().values())
+
+    def get_music(self, music_id: int) -> Music | None:
+        return self._merged_music().get(music_id)
+
+    def regions_for_music(self, music_id: int) -> list[str]:
+        return [
+            r
+            for r in self.regions
+            if any(m.id == music_id for m in self._music_cache.get(r, []))
+        ]
+
+    def events(self) -> list[Event]:
+        return list(self._merged_events().values())
+
+    def get_event(self, event_id: int) -> Event | None:
+        return self._merged_events().get(event_id)
+
+    def characters(self) -> list[Character]:
+        return self._characters
+
+    def get_character(self, character_id: int) -> Character | None:
+        return next((c for c in self._characters if c.id == character_id), None)
+
+    def cc_teams(self) -> list[CheerfulCarnivalTeam]:
+        return self._cc_teams
+
+    def cards(self) -> list[Card]:
+        return self._cards
+
+    def get_card(self, card_id: int) -> Card | None:
+        return next((c for c in self._cards if c.id == card_id), None)
+
+    def gachas(self, region: str | None = None) -> list[Gacha]:
+        """Gacha ids are per-region sequences, so no cross-region merge."""
+        if region is not None:
+            return self._gacha_cache.get(region, [])
+        for r in self.regions:
+            if self._gacha_cache.get(r):
+                return self._gacha_cache[r]
+        return []
+
+    def get_gacha(self, gacha_id: int, region: str | None = None) -> Gacha | None:
+        return next((g for g in self.gachas(region) if g.id == gacha_id), None)
+
+    def card_display_name(
+        self, card: Card, *, use_emojis: bool = False, trained: bool = False
+    ) -> str:
+        char = self.get_character(card.character_id)
+        name = (
+            character_display_name(char) if char else f"Character {card.character_id}"
+        )
+        if use_emojis:
+            rare = card.card_rarity_type.split("_")[-1]
+            if rare.isdigit():
+                star = emojis.rarities["trained" if trained else "untrained"]
+                rarity = star * int(rare)
+            else:
+                rarity = emojis.rarities["birthday"]
+            attr = (
+                emojis.attributes.get(card.attr, f"[{card.attr}]") if card.attr else ""
+            )
+        else:
+            rarity = RARITY_DISPLAY.get(card.card_rarity_type, card.card_rarity_type)
+            attr = f"[{card.attr}]" if card.attr else ""
+        return f"{name} - {rarity} {attr} {card.prefix}".replace("  ", " ").strip()
+
+    def search_songs(self, query: str, limit: int = 200) -> list[int]:
+        return search.fuzzy_search_playlists(query, limit=limit)
+
+    def search_song_levelkeys(
+        self, query: str, limit: int = 200
+    ) -> list[search.LevelKey]:
+        return search.fuzzy_search(query, limit=limit)
+
+    def search_events(self, query: str, limit: int = 50) -> list[int]:
+        return search.fuzzy_search_events(query, limit=limit)
+
+    def best_song_id(self, query: str) -> int | None:
+        return search.best_song_match(query)
+
+    def best_event_id(self, query: str) -> int | None:
+        return search.best_event_match(query)
+
+    def get_play_level(self, music_id: int, difficulty: str) -> int | None:
+        music = self.get_music(music_id)
+        if not music:
+            return None
+        for d in music.difficulties:
+            if d.difficulty == difficulty:
+                return d.play_level
+        return None
+
+    # --- refresh / polling ---
+
+    async def _fetch_versions(self) -> dict[str, str]:
+        results = await asyncio.gather(
+            *[self.client.get_version(r) for r in self.regions],
+            return_exceptions=True,
+        )
+        versions: dict[str, str] = {}
+        for r, res in zip(self.regions, results):
+            versions[r] = (
+                res.data_version or "" if not isinstance(res, BaseException) else ""
+            )
+        return versions
+
+    async def refresh(self, force: bool = False) -> bool:
+        async with self._lock:
+            versions = await self._fetch_versions()
+
+            changed = force or not self._music_cache
+            for r in self.regions:
+                if versions[r] and versions[r] != self._versions.get(r):
+                    changed = True
+                if versions[r] and not self._music_cache.get(r):
+                    changed = True  # region never fetched (or a past fetch failed)
+            if not changed:
+                return False
+
+            print("[PJSKData] data version changed, fetching...")
+            music_results = await asyncio.gather(
+                *[self.client.get_musics(r, ignore_leak=False) for r in self.regions],
+                return_exceptions=True,
+            )
+            new_music: dict[str, list[Music]] = {}
+            for r, res in zip(self.regions, music_results):
+                if isinstance(res, list) and res:
+                    new_music[r] = res
+                else:
+                    # keep old data and old version so the region retries next poll
+                    new_music[r] = self._music_cache.get(r, [])
+                    versions[r] = self._versions.get(r, "")
+                    print(f"[PJSKData] /musics failed for {r} — keeping cached data")
+            if not any(new_music.values()):
+                print("[PJSKData] no music received, skipping")
+                return False
+
+            self._music_cache = new_music
+            self._versions = {r: versions[r] for r in self.regions}
+
+            merged = list(self._merged_music().values())
+            search.build_search_maps(merged, new_music, versions=self._versions)
+            self._save_music()
+
+            await self._refresh_events()
+            await self._refresh_extras()
+            return True
+
+    async def _get_masters(self, files: tuple[str, ...], region: Region) -> list:
+        return await asyncio.gather(*[self.client.get_master(f, region) for f in files])
+
+    async def _refresh_events(self) -> None:
+        new_events: dict[str, list[Event]] = {}
+        unavailable = False
+        for r in self.regions:
+            try:
+                events_raw, bonuses, blooms, units = await self._get_masters(
+                    masterdata.EVENT_FILES, r
+                )
+                new_events[r] = masterdata.build_events(
+                    events_raw, bonuses, blooms, units, partial(self._asset_url, r)
+                )
+            except Exception:
+                unavailable = True
+                new_events[r] = self._event_cache.get(r, [])
+        if unavailable:
+            print(
+                "[PJSKData] /master event files not available yet — event features "
+                "dormant (see MISSING_SBUGA_ROUTES.md #1)"
+            )
+        self._event_cache = new_events
+        await self._apply_event_aliases()
+        search.build_event_search_map(self._all_region_events())
+        self._save_events()
+
+    async def _apply_event_aliases(self) -> None:
+        try:
+            aliases = await self.client.get_event_aliases()
+        except Exception:
+            return
+        by_event: dict[int, list[str]] = {}
+        for a in aliases:
+            by_event.setdefault(a.event_id, []).append(a.alias)
+        for events in self._event_cache.values():
+            for e in events:
+                e.name_variants = by_event.get(e.id, [])
+
+    async def _refresh_extras(self) -> None:
+        chars: dict[int, Character] = {}
+        teams: dict[int, CheerfulCarnivalTeam] = {}
+        cards: dict[int, Card] = {}
+        new_gachas: dict[str, list[Gacha]] = {}
+        available = False
+        for r in reversed(self.regions):  # first region in the list wins merges
+            try:
+                game_chars, profiles, cc_teams = await self._get_masters(
+                    masterdata.CHARACTER_FILES, r
+                )
+                cards_raw = await self.client.get_master("cards", r)
+                gachas_raw = await self.client.get_master("gachas", r)
+            except Exception:
+                new_gachas[r] = self._gacha_cache.get(r, [])
+                continue
+            available = True
+            for c in masterdata.build_characters(game_chars, profiles):
+                chars[c.id] = c
+            for t in masterdata.build_teams(cc_teams):
+                teams[t.id] = t
+            for card in masterdata.build_cards(cards_raw, partial(self._asset_url, r)):
+                cards[card.id] = card
+            new_gachas[r] = masterdata.build_gachas(
+                gachas_raw, partial(self._asset_url, r)
+            )
+
+        if available:
+            self._characters = list(chars.values())
+            self._cc_teams = list(teams.values())
+            self._cards = list(cards.values())
+        else:
+            print(
+                "[PJSKData] /master character/card/gacha files not available yet — "
+                "character/gacha features dormant (see MISSING_SBUGA_ROUTES.md #1)"
+            )
+        self._gacha_cache = new_gachas
+        self._save_extras()
+
+    async def _poll(self) -> None:
+        while True:
+            await asyncio.sleep(self.refresh_interval)
+            try:
+                await self.refresh()
+            except Exception as e:
+                print(f"[PJSKData] refresh error: {e}")
+
+    async def start(self) -> None:
+        self._load_from_disk()
+        if self._music_cache:
+            merged = list(self._merged_music().values())
+            search.build_search_maps(merged, self._music_cache, versions=self._versions)
+            search.build_event_search_map(self._all_region_events())
+        try:
+            await self.refresh()
+        except SbugaError as e:
+            print(f"[PJSKData] initial refresh failed: {e}")
+        self._task = asyncio.create_task(self._poll())
+
+    async def stop(self) -> None:
+        if self._task:
+            self._task.cancel()

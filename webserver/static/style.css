@@ -1,0 +1,74 @@
+@font-face {
+  font-family: "RodinNTLG";
+  src: url("fonts/rodinntlg_m.otf") format("opentype");
+  font-weight: 400;
+}
+@font-face {
+  font-family: "RodinNTLG";
+  src: url("fonts/rodinntlg_db.otf") format("opentype");
+  font-weight: 600;
+}
+@font-face {
+  font-family: "RodinNTLG";
+  src: url("fonts/rodinntlg_eb.otf") format("opentype");
+  font-weight: 800;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: "RodinNTLG", "gg sans", "Segoe UI", system-ui, sans-serif;
+  background: #1e1f22;
+  color: #f2f3f5;
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+}
+
+#app { width: min(480px, 94vw); padding: 24px 0; }
+
+.screen { display: none; flex-direction: column; gap: 14px; text-align: center; }
+.screen.active { display: flex; }
+
+h1, h2 { font-weight: 800; }
+h1 { font-size: 2rem; }
+.sub { color: #b5bac1; }
+
+button {
+  font: inherit;
+  font-weight: 600;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 18px;
+  background: #5865f2;
+  color: #fff;
+  cursor: pointer;
+}
+button:hover { background: #4752c4; }
+button.big { font-size: 1.15rem; padding: 14px; }
+button.link { background: none; color: #b5bac1; }
+button.link:hover { color: #fff; text-decoration: underline; }
+
+select, input {
+  font: inherit;
+  border-radius: 8px;
+  border: 1px solid #3f4147;
+  background: #2b2d31;
+  color: #f2f3f5;
+  padding: 10px;
+  width: 100%;
+}
+
+.round-head { display: flex; justify-content: space-between; align-items: center; }
+#round-timer { font-variant-numeric: tabular-nums; color: #b5bac1; }
+#round-timer.low { color: #f23f43; }
+
+.prompt { font-size: 1.05rem; }
+#round-image { max-width: 100%; border-radius: 8px; image-rendering: pixelated; align-self: center; }
+
+#guess-form { display: flex; gap: 8px; }
+#guess-form input { flex: 1; }
+
+#round-result { min-height: 1.4em; }
+#round-result.good { color: #23a55a; }
+#round-result.bad { color: #f23f43; }

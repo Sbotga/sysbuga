@@ -1,0 +1,33 @@
+# Discord
+discord.py
+
+# Database
+asyncpg
+
+# Config
+pyyaml
+
+# Network
+aiohttp
+brotli>=1.2  # aiohttp 3.13+ passes max_length to the decompressor; older Brotli breaks on Discord's br responses
+
+# Public API server
+fastapi
+uvicorn
+
+# Data models
+pydantic
+
+# Local fuzzy search (song/event matching, JP/KR/ZH romanization)
+rapidfuzz
+cutlet
+unidic-lite
+korean-romanizer==0.28.0
+pinyin-jyutping==0.9
+
+# Images
+pillow
+numpy
+
+# Console
+colorama

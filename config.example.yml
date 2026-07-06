@@ -1,0 +1,33 @@
+discord:
+  name: "SYSbuga"                 # display name in embeds/images
+  token: ""
+  client_secret: ""               # OAuth2 client secret
+  owner_ids: []
+  support_invite: ""
+  support_id: 0                   # support server guild id
+  alias_manager_role_ids: []      # roles that can manage aliases
+
+sbuga:
+  api_url: "https://api.sbuga.com"
+  asset_base_url: ""              # R2 public base url; empty = use the API passthrough
+  alias_token: ""                 # service token for alias editing
+  image_type: "webp"              # webp | png
+  regions: ["en", "jp", "kr", "tw"]  # merge priority order
+  refresh_interval: 300           # seconds between data-version polls
+
+api:                              # public API server
+  enabled: false
+  host: "0.0.0.0"
+  port: 8039
+
+psql:
+  host: "127.0.0.1"
+  user: "sbuga"
+  database: "sbuga_bot"
+  port: 5432
+  password: ""
+  pool_min_size: 3
+  pool_max_size: 10
+
+migrate:
+  old_dsn: ""                     # old Sbotga DB (scripts/migrate_from_sbotga.py)

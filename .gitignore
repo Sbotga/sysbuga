@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Secrets
+config.yml
+
+# Generated data caches
+cache/
+
+# App-specific emoji ids (regenerate: python -m scripts.upload_emojis)
+data/emojis.json
+
+# Local logs / runtime
+*.log
+synced_commands.data
+
+# Note: data/assets/ (static images/fonts) is intentionally tracked
