@@ -21,7 +21,7 @@ pydantic
 # Local fuzzy search (song/event matching, JP/KR/ZH romanization)
 rapidfuzz
 cutlet
-unidic-lite
+unidic
 korean-romanizer==0.28.0
 pinyin-jyutping==0.9
 
