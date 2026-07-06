@@ -42,15 +42,15 @@ router = APIRouter(prefix="/api/activity")
 _rounds: dict[str, dict[str, Any]] = {}  # round_id -> round
 _user_rounds: dict[int, str] = {}  # user_id -> active round_id
 _token_cache: dict[str, tuple[int, float]] = {}  # bearer -> (user_id, cached_at)
-_pending_modes: dict[int, tuple[str, float]] = {}  # user_id -> (mode, staged_at)
+_staged_launches: dict[str, tuple[str | None, float]] = {}  # instance_id -> (mode, at)
 TOKEN_CACHE_TTL = 600
-PENDING_MODE_TTL = 120
+STAGED_TTL = 600
 
 
-def set_pending_mode(user_id: int, mode: str) -> None:
-    """Stage a mode for a user about to launch the activity (from /activity
-    guess), so the frontend can skip straight into a round."""
-    _pending_modes[user_id] = (mode, time.time())
+def stage_launch(instance_id: str, mode: str | None) -> None:
+    """Remember what /activity guess launched: keyed by the activity instance
+    the interaction created, so a later normal launch is unaffected."""
+    _staged_launches[instance_id] = (mode, time.time())
 
 
 class StartBody(BaseModel):
@@ -88,6 +88,8 @@ def _prune() -> None:
         _rounds.pop(rid, None)
     for uid in [u for u, r in _user_rounds.items() if r not in _rounds]:
         _user_rounds.pop(uid, None)
+    for iid in [i for i, (_, at) in _staged_launches.items() if at + STAGED_TTL < now]:
+        _staged_launches.pop(iid, None)
 
 
 async def _build_round(bot: SbugaBot, mode: str) -> dict[str, Any] | None:
@@ -237,14 +239,15 @@ async def modes() -> list[dict[str, Any]]:
 
 
 @router.get("/pending")
-async def pending_mode(
+async def pending_launch(
+    instance_id: str,
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    user_id = await _resolve_user(authorization)
-    staged = _pending_modes.pop(user_id, None)
-    if staged and staged[1] + PENDING_MODE_TTL > time.time():
-        return {"mode": staged[0]}
-    return {"mode": None}
+    await _resolve_user(authorization)
+    staged = _staged_launches.pop(instance_id, None)
+    if staged and staged[1] + STAGED_TTL > time.time():
+        return {"staged": True, "mode": staged[0]}
+    return {"staged": False, "mode": None}
 
 
 @router.post("/guess/start")

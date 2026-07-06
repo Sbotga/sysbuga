@@ -6,9 +6,11 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from discord.interactions import InteractionCallbackActivityInstance
+
 from helpers import embeds
 from helpers.autocompletes import autocompletes
-from webserver.activity import MODES, set_pending_mode
+from webserver.activity import MODES, stage_launch
 
 if TYPE_CHECKING:
     from main import SbugaBot
@@ -27,21 +29,20 @@ class ActivityCog(commands.Cog):
         ),
     )
 
-    @activity.command(
-        name="guess", description="Launch the guessing activity in a chosen mode."
-    )
+    @activity.command(name="guess", description="Launch the guessing activity.")
     @app_commands.autocomplete(mode=autocompletes.pjsk_guessing_types)
-    @app_commands.describe(mode="Guess mode to start in.")
-    async def guess(self, interaction: discord.Interaction, mode: str) -> None:
-        if mode not in MODES:
+    @app_commands.describe(mode="Guess mode to start in (omit to pick in-app).")
+    async def guess(
+        self, interaction: discord.Interaction, mode: str | None = None
+    ) -> None:
+        if mode is not None and mode not in MODES:
             await interaction.response.send_message(
                 embed=embeds.error_embed("Pick a mode from the autocomplete."),
                 ephemeral=True,
             )
             return
-        set_pending_mode(interaction.user.id, mode)
         try:
-            await interaction.response.launch_activity()
+            resp = await interaction.response.launch_activity()
         except discord.HTTPException as e:
             await interaction.response.send_message(
                 embed=embeds.error_embed(
@@ -49,6 +50,9 @@ class ActivityCog(commands.Cog):
                 ),
                 ephemeral=True,
             )
+            return
+        if isinstance(resp.resource, InteractionCallbackActivityInstance):
+            stage_launch(resp.resource.id, mode)
 
 
 async def setup(bot: SbugaBot) -> None:

@@ -76,11 +76,18 @@ async function boot() {
     select.appendChild(option);
   }
 
-  // /activity guess staged a mode — jump straight into a round.
-  const pending = await api("/api/activity/pending");
-  if (pending.mode && [...select.options].some((o) => o.value === pending.mode)) {
-    select.value = pending.mode;
-    await startRound();
+  // Launched via /activity guess? The staged entry is keyed to this exact
+  // activity instance, so normal launches are unaffected.
+  const pending = await api(
+    `/api/activity/pending?instance_id=${encodeURIComponent(sdk.instanceId)}`
+  );
+  if (pending.staged) {
+    if (pending.mode && [...select.options].some((o) => o.value === pending.mode)) {
+      select.value = pending.mode;
+      await startRound();
+    } else {
+      show("setup");
+    }
     return;
   }
 
