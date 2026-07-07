@@ -17,7 +17,7 @@ let appName = "SYSbuga";
 
 const $ = (id) => document.getElementById(id);
 
-const TITLES = { home: "SYSbuga", setup: "Guessing", settings: "Settings" };
+const TITLES = { setup: "Guessing" };
 
 function show(screen) {
   document.querySelectorAll(".screen").forEach((s) => s.classList.remove("active"));
@@ -30,8 +30,14 @@ function show(screen) {
     bar.hidden = false;
     $("topbar-title").textContent = TITLES[screen] || appName;
     $("topbar-back").hidden = screen === "home";
-    $("btn-settings").hidden = screen === "settings";
   }
+}
+
+function openSettings() {
+  $("settings-modal").hidden = false;
+}
+function closeSettings() {
+  $("settings-modal").hidden = true;
 }
 
 async function api(path, options = {}) {
@@ -191,11 +197,12 @@ function setFormEnabled(on) {
 function logEntry(icon, text, cls) {
   const li = document.createElement("li");
   li.className = cls;
-  li.innerHTML = `<span class="icon"></span><span class="text"></span>`;
-  li.querySelector(".icon").textContent = icon;
+  li.innerHTML = `<span class="marker"></span><span class="text"></span>`;
+  li.querySelector(".marker").textContent = icon;
   li.querySelector(".text").textContent = text;
   const log = $("guess-log");
-  log.prepend(li);
+  log.append(li);
+  log.scrollTop = log.scrollHeight;
 }
 
 async function startRound(mode) {
@@ -333,7 +340,11 @@ async function useHint() {
 
 $("btn-guessing").addEventListener("click", () => show("setup"));
 $("topbar-back").addEventListener("click", () => show("home"));
-$("btn-settings").addEventListener("click", () => show("settings"));
+$("btn-settings").addEventListener("click", openSettings);
+$("settings-close").addEventListener("click", closeSettings);
+$("settings-modal").addEventListener("click", (e) => {
+  if (e.target === $("settings-modal")) closeSettings();
+});
 $("theme-toggle").addEventListener("change", toggleTheme);
 $("btn-start").addEventListener("click", () => startRound($("mode-select").value));
 $("btn-again").addEventListener("click", () => startRound(currentMode));
