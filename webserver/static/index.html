@@ -8,34 +8,44 @@
 </head>
 <body>
   <canvas id="rain"></canvas>
-  <button id="btn-theme" aria-label="Toggle theme" title="Toggle light/dark" hidden>🌙</button>
+
+  <header id="topbar" hidden>
+    <button id="topbar-back" class="icon-btn" aria-label="Back" hidden>←</button>
+    <span id="topbar-title" class="brand">SYSbuga</span>
+    <button id="btn-settings" class="icon-btn" aria-label="Settings" title="Settings">⚙</button>
+  </header>
 
   <main id="app">
-    <section id="screen-loading" class="screen active">
+    <section id="screen-loading" class="screen active center">
       <h1 id="app-name">SYSbuga</h1>
-      <p id="loading-text">Connecting…</p>
+      <div class="progress"><div class="progress-fill"></div></div>
+      <p id="loading-error" class="error-text" hidden></p>
     </section>
 
-    <section id="screen-home" class="screen">
-      <h1>SYSbuga</h1>
-      <p class="sub">Pick an activity</p>
-      <button id="btn-guessing" class="big">🎧 Guessing</button>
+    <section id="screen-home" class="screen center">
+      <h1 class="home-title">SYSbuga</h1>
+      <p class="sub">Choose an activity</p>
+      <div class="activity-grid">
+        <button id="btn-guessing" class="activity-card">
+          <span class="activity-icon">🎧</span>
+          <span class="activity-name">Guessing</span>
+        </button>
+      </div>
     </section>
 
-    <section id="screen-setup" class="screen">
-      <button class="back" data-target="home" aria-label="Back">←</button>
+    <section id="screen-setup" class="screen center">
       <h2>Guessing</h2>
       <p class="sub">Choose a mode</p>
       <select id="mode-select"></select>
-      <button id="btn-start" class="big">Start</button>
+      <button id="btn-start" class="primary">Start</button>
     </section>
 
     <section id="screen-round" class="screen wide">
-      <header class="round-header">
+      <div class="round-bar">
         <button id="btn-quit" class="icon-btn" aria-label="Back">←</button>
         <span id="round-mode" class="round-title"></span>
         <button id="btn-hint" class="icon-btn" aria-label="Hint" title="Hint">💡</button>
-      </header>
+      </div>
       <span id="round-timer" class="timer" hidden></span>
       <p id="round-prompt" class="prompt"></p>
       <div id="round-image-wrap"><img id="round-image" alt="" hidden /></div>
@@ -44,9 +54,21 @@
                autocapitalize="off" placeholder="Type your guess…" maxlength="200" />
         <button type="submit" id="guess-submit">Guess</button>
       </form>
+      <button id="btn-giveup" class="link-btn" hidden>Give up</button>
       <p id="round-result"></p>
       <ul id="guess-log"></ul>
-      <button id="btn-again" class="big" hidden>Play again</button>
+      <button id="btn-again" class="primary" hidden>Play again</button>
+    </section>
+
+    <section id="screen-settings" class="screen">
+      <h2>Settings</h2>
+      <div class="setting-row">
+        <span class="setting-label">Dark mode</span>
+        <label class="switch">
+          <input type="checkbox" id="theme-toggle" />
+          <span class="slider"></span>
+        </label>
+      </div>
     </section>
   </main>
 

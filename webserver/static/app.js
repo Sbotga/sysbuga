@@ -13,12 +13,25 @@ let currentMode = null;
 let currentRound = null; // active (unfinished) round, else null
 let timerHandle = null;
 let theme = "dark";
+let appName = "SYSbuga";
 
 const $ = (id) => document.getElementById(id);
+
+const TITLES = { home: "SYSbuga", setup: "Guessing", settings: "Settings" };
 
 function show(screen) {
   document.querySelectorAll(".screen").forEach((s) => s.classList.remove("active"));
   $(`screen-${screen}`).classList.add("active");
+
+  const bar = $("topbar");
+  if (screen === "loading" || screen === "round") {
+    bar.hidden = true;
+  } else {
+    bar.hidden = false;
+    $("topbar-title").textContent = TITLES[screen] || appName;
+    $("topbar-back").hidden = screen === "home";
+    $("btn-settings").hidden = screen === "settings";
+  }
 }
 
 async function api(path, options = {}) {
@@ -63,11 +76,11 @@ function confirmModal(text, confirmText = "Confirm", cancelText = "Cancel") {
 
 function applyTheme() {
   document.body.classList.toggle("light", theme === "light");
-  $("btn-theme").textContent = theme === "light" ? "☀️" : "🌙";
+  $("theme-toggle").checked = theme === "dark";
 }
 
 async function toggleTheme() {
-  theme = theme === "light" ? "dark" : "light";
+  theme = $("theme-toggle").checked ? "dark" : "light";
   applyTheme();
   try {
     await api("/api/activity/settings", {
@@ -79,31 +92,34 @@ async function toggleTheme() {
 
 // --- boot / auth ---
 
-const status = (t) => ($("loading-text").textContent = t);
+function bootError(msg) {
+  const bar = document.querySelector(".progress");
+  if (bar) bar.hidden = true;
+  $("loading-error").hidden = false;
+  $("loading-error").textContent = msg;
+}
 
 async function boot() {
-  status("Contacting server…");
   const config = await api("/api/config");
   if (config.name) {
-    document.title = config.name;
-    $("app-name").textContent = config.name;
-    document.querySelector("#screen-home h1").textContent = config.name;
+    appName = config.name;
+    document.title = appName;
+    $("app-name").textContent = appName;
+    document.querySelector(".home-title").textContent = appName;
   }
 
   if (!EMBEDDED) {
-    status("Server is up! Open this as an activity inside Discord to play.");
+    bootError("Server is up! Open this as an activity inside Discord to play.");
     return;
   }
   if (!config.client_id) {
-    status("Server isn't configured yet (no client id).");
+    bootError("Server isn't configured yet (no client id).");
     return;
   }
 
-  status("Handshaking with Discord…");
   const sdk = new DiscordSDK(config.client_id);
   await sdk.ready();
 
-  status("Authorizing…");
   const { code } = await sdk.commands.authorize({
     client_id: config.client_id,
     response_type: "code",
@@ -111,7 +127,6 @@ async function boot() {
     scope: ["identify"],
   });
 
-  status("Signing in…");
   const token = await api("/api/oauth/token", {
     method: "POST",
     body: JSON.stringify({ code }),
@@ -119,13 +134,11 @@ async function boot() {
   accessToken = token.access_token;
   await sdk.commands.authenticate({ access_token: accessToken });
 
-  status("Loading…");
   try {
     const settings = await api("/api/activity/settings");
     theme = settings.theme === "light" ? "light" : "dark";
   } catch {}
   applyTheme();
-  $("btn-theme").hidden = false;
 
   const modes = await api("/api/activity/modes");
   const select = $("mode-select");
@@ -195,6 +208,7 @@ async function startRound(mode) {
   $("guess-log").innerHTML = "";
   $("btn-again").hidden = true;
   $("guess-form").hidden = false;
+  $("btn-giveup").hidden = true; // shown once the round is live
   $("round-image").hidden = true;
   $("round-timer").hidden = true; // no timer while loading
   $("round-prompt").textContent = "Loading…";
@@ -222,6 +236,7 @@ async function startRound(mode) {
     img.hidden = false;
   }
   setFormEnabled(true);
+  $("btn-giveup").hidden = false;
   $("guess-input").focus();
   startTimer(round.expires_at);
 }
@@ -232,8 +247,10 @@ function showReveal(round, message, cls) {
   $("round-timer").hidden = true;
   setResult(message, cls);
   $("guess-form").hidden = true;
+  $("btn-giveup").hidden = true;
   $("btn-hint").disabled = true;
   $("btn-again").hidden = false;
+  // the guess log stays visible after the reveal on purpose
   if (round.has_reveal) {
     const img = $("round-image");
     img.src = `${API}/api/activity/guess/round/${round.round_id}/reveal`;
@@ -273,18 +290,28 @@ async function submitGuess(event) {
   }
 }
 
-async function timeUp() {
-  if (!currentRound) return;
-  const round = currentRound;
+async function reveal(round, prefix, cls) {
   try {
     const res = await api("/api/activity/guess/reveal", {
       method: "POST",
       body: JSON.stringify({ round_id: round.round_id }),
     });
-    showReveal({ ...round, ...res }, `Time's up! It was ${res.answer}.`, "bad");
+    showReveal({ ...round, ...res }, `${prefix} It was ${res.answer}.`, cls);
   } catch {
-    showReveal(round, "Time's up!", "bad");
+    showReveal(round, prefix, cls);
   }
+}
+
+async function timeUp() {
+  if (!currentRound) return;
+  await reveal(currentRound, "Time's up!", "bad");
+}
+
+async function giveUp() {
+  if (!currentRound) return;
+  if (!(await confirmModal("Give up and reveal the answer?", "Give up", "Keep playing"))) return;
+  if (!currentRound) return;
+  await reveal(currentRound, "You gave up.", "bad");
 }
 
 async function useHint() {
@@ -305,14 +332,14 @@ async function useHint() {
 // --- wiring ---
 
 $("btn-guessing").addEventListener("click", () => show("setup"));
-document
-  .querySelectorAll(".back[data-target]")
-  .forEach((b) => b.addEventListener("click", () => show(b.dataset.target)));
+$("topbar-back").addEventListener("click", () => show("home"));
+$("btn-settings").addEventListener("click", () => show("settings"));
+$("theme-toggle").addEventListener("change", toggleTheme);
 $("btn-start").addEventListener("click", () => startRound($("mode-select").value));
 $("btn-again").addEventListener("click", () => startRound(currentMode));
 $("guess-form").addEventListener("submit", submitGuess);
 $("btn-hint").addEventListener("click", useHint);
-$("btn-theme").addEventListener("click", toggleTheme);
+$("btn-giveup").addEventListener("click", giveUp);
 
 $("btn-quit").addEventListener("click", async () => {
   if (!currentRound) return show("setup"); // already revealed
@@ -332,5 +359,5 @@ try {
 }
 
 boot().catch((e) => {
-  status(`Failed to connect: ${e.message}`);
+  bootError(`Failed to connect: ${e.message}`);
 });
