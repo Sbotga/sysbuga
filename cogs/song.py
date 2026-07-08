@@ -330,19 +330,29 @@ class SongInfo(commands.Cog):
         sonolus_url = None
         if get_config()["sbuga"]["sonolus_url"]:
             sonolus_url = f"{get_config()['sbuga']['sonolus_url']}/playlists/sss-custom-{region}-{chart_id}"
-        buttons = [("Open Chart", url)]
+        buttons = []
+        if not hide_chart:
+            buttons.append(("Open Chart", url))
         if sonolus_url:
             buttons.append(("Play On Sonolus", sonolus_url))
-        view = LinkButtonView(buttons)
+        if buttons:
+            view = LinkButtonView(buttons)
+        else:
+            view = None
         file = (
             discord.File(BytesIO(chart_bytes), "chart.png")
             if chart_bytes
             else discord.utils.MISSING
         )
-        await interaction.followup.send(
-            content=f"`{chart_id}`", embed=embed, file=file, view=view
-        )
-        view.message = await interaction.original_response()
+        if view:
+            await interaction.followup.send(
+                content=f"`{chart_id}`", embed=embed, file=file, view=view
+            )
+            view.message = await interaction.original_response()
+        else:
+            await interaction.followup.send(
+                content=f"`{chart_id}`", embed=embed, file=file
+            )
 
     @song.command(name="info", description="View a song's data.")
     @app_commands.autocomplete(song=autocompletes.pjsk_song)
