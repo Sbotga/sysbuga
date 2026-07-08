@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from io import BytesIO
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import aiohttp
 import discord
@@ -24,6 +25,17 @@ DIFFICULTY_ORDER = ["append", "master", "expert", "hard", "normal", "easy"]
 STRATEGY_META = (
     "https://raw.githubusercontent.com/Sbotga/strategies/refs/heads/main/meta.json"
 )
+
+# Official PJSK difficulty colours (nxsk-chart-preview / OpenSekai PaletteStore).
+# APPEND is the average of its gradient's two ends (171,147,255)+(255,124,217).
+DIFFICULTY_COLORS = {
+    "easy": discord.Color.from_rgb(17, 221, 119),
+    "normal": discord.Color.from_rgb(51, 204, 255),
+    "hard": discord.Color.from_rgb(255, 204, 0),
+    "expert": discord.Color.from_rgb(255, 68, 119),
+    "master": discord.Color.from_rgb(204, 51, 255),
+    "append": discord.Color.from_rgb(213, 136, 236),
+}
 
 
 class SongInfo(commands.Cog):
@@ -194,6 +206,106 @@ class SongInfo(commands.Cog):
         view = LinkButtonView([("Open Chart", url)])
         await interaction.followup.send(
             embed=embed, file=discord.File(BytesIO(chart_bytes), "chart.png"), view=view
+        )
+        view.message = await interaction.original_response()
+
+    @song.command(name="custom", description="View a custom chart/score by its id.")
+    @app_commands.describe(
+        chart_id="The published custom chart/score id.",
+        # region="Which server the chart is published on.",
+    )
+    async def custom(
+        self,
+        interaction: discord.Interaction,
+        chart_id: str,
+        # region: Literal["jp", "en"] = "jp",
+    ) -> None:
+        region = "jp"  # only jp is available for now
+        await interaction.response.defer(thinking=True)
+
+        # render first: the image endpoint counts the combo from the score and
+        # caches it onto the metadata, so the info fetch below picks it up
+        try:
+            chart_bytes = await self.bot.sbuga.get_custom_chart_image(chart_id, region)  # type: ignore[union-attr]
+        except SbugaNotFound:
+            await interaction.followup.send(
+                embed=embeds.error_embed(f"No custom chart with id `{chart_id}`.")
+            )
+            return
+        except SbugaError as e:
+            await interaction.followup.send(
+                embed=embeds.error_embed(
+                    f"Couldn't render that custom chart: {e.detail or e.status}"
+                )
+            )
+            return
+
+        try:
+            info = await self.bot.sbuga.get_custom_chart_info(chart_id, region)  # type: ignore[union-attr]
+        except SbugaError:
+            info = {}
+
+        level1 = info.get("userCustomMusicScoreInfoJson") or {}
+        inner = level1.get("userCustomMusicScoreInfoJson") or {}
+        custom_title = inner.get("title") or "Custom Chart"
+        music_id = inner.get("musicId") or level1.get("musicId")
+        diff = (level1.get("musicDifficultyType") or "").lower()
+        play_level = level1.get("playLevel")
+        description = level1.get("description") or ""
+        play_count = level1.get("playCount")
+        fc_rate = level1.get("fullComboRate")
+        like_count = level1.get("likeCount")
+        combo_count = info.get("combo_count")
+        refreshed_at = info.get("refreshed_at")
+
+        base = self.bot.pjsk.get_music(music_id) if music_id is not None else None  # type: ignore[union-attr]
+        original = base.title if base else "Unknown"
+
+        desc_lines = [f"**Original Song:** {original}"]
+        if description:
+            desc_lines += ["", description]
+
+        embed = embeds.embed(
+            title=custom_title,
+            description="\n".join(desc_lines),
+            color=DIFFICULTY_COLORS.get(diff, discord.Color.blurple()),
+        )
+        diff_emoji = emojis.difficulty_colors.get(diff, "")
+        embed.add_field(
+            name="Play Level",
+            value=str(play_level if play_level is not None else "?"),
+            inline=False,
+        )
+        embed.add_field(
+            name="Difficulty",
+            value=f"{diff_emoji} {diff.title()}".strip() or "?",
+            inline=False,
+        )
+        if combo_count is not None:
+            embed.add_field(name="Combo", value=f"{combo_count:,}", inline=True)
+        if play_count is not None:
+            embed.add_field(name="Plays", value=f"{play_count:,}", inline=True)
+        if fc_rate is not None:
+            embed.add_field(name="FC Rate", value=f"{fc_rate:.1f}%", inline=True)
+        if like_count is not None:
+            embed.add_field(name="Likes", value=f"{like_count:,}", inline=True)
+        embed.add_field(name="Chart ID", value=f"`{chart_id}`", inline=False)
+        if base and base.jacket_url:
+            embed.set_thumbnail(url=base.jacket_url)
+        embed.set_image(url="attachment://chart.png")
+        if refreshed_at:
+            embed.timestamp = datetime.fromtimestamp(refreshed_at, tz=timezone.utc)
+            embed.set_footer(text="Last refreshed")
+
+        url = (
+            f"{self.bot.sbuga.base}/api/tools/custom_chart"  # type: ignore[union-attr]
+            f"?chart_id={chart_id}&region={region}&chart_image=true"
+        )
+        view = LinkButtonView([("Open Chart", url)])
+        await interaction.followup.send(
+            embed=embed,
+            file=discord.File(BytesIO(chart_bytes), "chart.png"),
+            view=view,
         )
         view.message = await interaction.original_response()
 
