@@ -105,6 +105,23 @@ function bootError(msg) {
   $("loading-error").textContent = msg;
 }
 
+// `prompt: "none"` returns a code silently for already-authorized users (no
+// consent screen each launch); fall back to the interactive consent the first
+// time, when there's nothing to silently reuse.
+async function authorize(sdk, clientId) {
+  const params = {
+    client_id: clientId,
+    response_type: "code",
+    state: "",
+    scope: ["identify"],
+  };
+  try {
+    return await sdk.commands.authorize({ ...params, prompt: "none" });
+  } catch {
+    return await sdk.commands.authorize(params);
+  }
+}
+
 async function boot() {
   const config = await api("/api/config");
   if (config.name) {
@@ -126,12 +143,7 @@ async function boot() {
   const sdk = new DiscordSDK(config.client_id);
   await sdk.ready();
 
-  const { code } = await sdk.commands.authorize({
-    client_id: config.client_id,
-    response_type: "code",
-    state: "",
-    scope: ["identify"],
-  });
+  const { code } = await authorize(sdk, config.client_id);
 
   const token = await api("/api/oauth/token", {
     method: "POST",
