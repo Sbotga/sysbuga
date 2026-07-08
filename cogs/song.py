@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+import time
 from io import BytesIO
 from typing import TYPE_CHECKING, Literal
 
@@ -146,6 +146,7 @@ class SongInfo(commands.Cog):
     @app_commands.describe(
         song="Song name or ID.",
         difficulty="Chart difficulty.",
+        region="Which server's chart to show (default: auto).",
         mirror="Show the mirrored chart (defaults to your setting).",
     )
     async def chart(
@@ -153,6 +154,7 @@ class SongInfo(commands.Cog):
         interaction: discord.Interaction,
         song: str,
         difficulty: str = "default",
+        region: Literal["jp", "en"] | None = None,
         mirror: bool | None = None,
     ) -> None:
         await interaction.response.defer(thinking=True)
@@ -173,10 +175,13 @@ class SongInfo(commands.Cog):
         embed = embeds.embed(title=music.title)
         chart_bytes = None
         used_region = None
-        for region in await self._chart_region(music, interaction.user.id):
+        regions = (
+            [region] if region else await self._chart_region(music, interaction.user.id)
+        )
+        for r in regions:
             try:
-                chart_bytes = await self.bot.sbuga.get_chart_image(music.id, diff, region, mirrored=bool(mirror))  # type: ignore[union-attr,arg-type]
-                used_region = region
+                chart_bytes = await self.bot.sbuga.get_chart_image(music.id, diff, r, mirrored=bool(mirror))  # type: ignore[union-attr,arg-type]
+                used_region = r
                 break
             except SbugaNotFound:
                 continue
@@ -218,7 +223,7 @@ class SongInfo(commands.Cog):
         self,
         interaction: discord.Interaction,
         chart_id: str,
-        # region: Literal["jp", "en"] = "jp",
+        # region: Literal["jp", "en"],
     ) -> None:
         region = "jp"  # only jp is available for now
         await interaction.response.defer(thinking=True)
@@ -262,8 +267,10 @@ class SongInfo(commands.Cog):
         original = base.title if base else "Unknown"
 
         desc_lines = [f"**Original Song:** {original}"]
-        if description:
+        if description.strip():
             desc_lines += ["", description]
+        else:
+            desc_lines += ["", "*No description by user.*"]
 
         embed = embeds.embed(
             title=custom_title,
@@ -294,8 +301,9 @@ class SongInfo(commands.Cog):
             embed.set_thumbnail(url=base.jacket_url)
         embed.set_image(url="attachment://chart.png")
         if refreshed_at:
-            embed.timestamp = datetime.fromtimestamp(refreshed_at, tz=timezone.utc)
-            embed.set_footer(text="Last refreshed")
+            embed.set_footer(
+                text=f"Last refreshed {round(time.time() - refreshed_at)}s ago"
+            )
 
         url = (
             f"{self.bot.sbuga.base}/api/tools/custom_chart"  # type: ignore[union-attr]
