@@ -9,6 +9,7 @@ discord:
 
 sbuga:
   api_url: "https://api.sbuga.com"
+  sonolus_url: "https://sonolus.sbuga.com"
   asset_base_url: ""              # R2 public base url; empty = use the API passthrough
   alias_token: ""                 # service token for alias editing
   image_type: "webp"              # webp | png

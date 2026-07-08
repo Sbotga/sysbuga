@@ -17,6 +17,8 @@ from helpers.emojis import emojis
 from helpers.views import LinkButtonView, SbugaView
 from services.sbuga import SbugaError, SbugaNotFound
 
+from helpers.config_loader import get_config
+
 if TYPE_CHECKING:
     from main import SbugaBot
 
@@ -325,7 +327,13 @@ class SongInfo(commands.Cog):
             f"?chart_id={chart_id}&region={region}&chart_image=true"
             f"&mirrored={str(bool(mirror)).lower()}"
         )
-        view = LinkButtonView([("Open Chart", url)])
+        sonolus_url = None
+        if get_config()["sbuga"]["sonolus_url"]:
+            sonolus_url = f"{get_config()['sbuga']['sonolus_url']}/playlist/sss-custom-{region}-{chart_id}"
+        buttons = [("Open Chart", url)]
+        if sonolus_url:
+            buttons.append(("Play On Sonolus", sonolus_url))
+        view = LinkButtonView(buttons)
         file = (
             discord.File(BytesIO(chart_bytes), "chart.png")
             if chart_bytes
