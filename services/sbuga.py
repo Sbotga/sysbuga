@@ -204,13 +204,16 @@ class SbugaClient:
             mirrored=str(mirrored).lower(),
         )
 
-    async def get_custom_chart_image(self, chart_id: str, region: Region) -> bytes:
+    async def get_custom_chart_image(
+        self, chart_id: str, region: Region, *, mirrored: bool = False
+    ) -> bytes:
         # renders + returns the custom chart png (server caches the image)
         return await self._get_bytes(
             "/tools/custom_chart",
             chart_id=chart_id,
             region=region,
             chart_image="true",
+            mirrored=str(mirrored).lower(),
         )
 
     async def get_custom_chart_info(self, chart_id: str, region: Region) -> dict:

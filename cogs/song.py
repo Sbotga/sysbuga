@@ -217,36 +217,48 @@ class SongInfo(commands.Cog):
     @song.command(name="custom", description="View a custom chart/score by its id.")
     @app_commands.describe(
         chart_id="The published custom chart/score id.",
-        # region="Which server the chart is published on.",
+        hide_chart="Hide the chart image (and combo count).",
+        mirror="Show the mirrored chart (defaults to your setting).",
     )
     async def custom(
         self,
         interaction: discord.Interaction,
         chart_id: str,
-        # region: Literal["jp", "en"],
+        hide_chart: bool = False,
+        mirror: bool | None = None,
     ) -> None:
         region = "jp"  # only jp is available for now
         await interaction.response.defer(thinking=True)
 
-        # render first: the image endpoint counts the combo from the score and
-        # caches it onto the metadata, so the info fetch below picks it up
+        if mirror is None:
+            mirror = await self.bot.user_data.get_settings(interaction.user.id, "mirror_charts_by_default")  # type: ignore[union-attr]
+
+        # render first (unless hidden): the image endpoint counts the combo from
+        # the score and caches it onto the metadata, so the info fetch picks it up
+        chart_bytes = None
+        if not hide_chart:
+            try:
+                chart_bytes = await self.bot.sbuga.get_custom_chart_image(chart_id, region, mirrored=bool(mirror))  # type: ignore[union-attr]
+            except SbugaNotFound:
+                await interaction.followup.send(
+                    embed=embeds.error_embed(f"No custom chart with id `{chart_id}`.")
+                )
+                return
+            except SbugaError as e:
+                await interaction.followup.send(
+                    embed=embeds.error_embed(
+                        f"Couldn't render that custom chart: {e.detail or e.status}"
+                    )
+                )
+                return
+
         try:
-            chart_bytes = await self.bot.sbuga.get_custom_chart_image(chart_id, region)  # type: ignore[union-attr]
+            info = await self.bot.sbuga.get_custom_chart_info(chart_id, region)  # type: ignore[union-attr]
         except SbugaNotFound:
             await interaction.followup.send(
                 embed=embeds.error_embed(f"No custom chart with id `{chart_id}`.")
             )
             return
-        except SbugaError as e:
-            await interaction.followup.send(
-                embed=embeds.error_embed(
-                    f"Couldn't render that custom chart: {e.detail or e.status}"
-                )
-            )
-            return
-
-        try:
-            info = await self.bot.sbuga.get_custom_chart_info(chart_id, region)  # type: ignore[union-attr]
         except SbugaError:
             info = {}
 
@@ -259,14 +271,17 @@ class SongInfo(commands.Cog):
         description = level1.get("description") or ""
         play_count = level1.get("playCount")
         fc_rate = level1.get("fullComboRate")
-        like_count = level1.get("likeCount")
+        like_count = level1.get("reviewCount")
         combo_count = info.get("combo_count")
         refreshed_at = info.get("refreshed_at")
 
         base = self.bot.pjsk.get_music(music_id) if music_id is not None else None  # type: ignore[union-attr]
         original = base.title if base else "Unknown"
 
-        desc_lines = [f"**Original Song:** {original}"]
+        desc_lines = []
+        if mirror and not hide_chart:
+            desc_lines += ["***MIRRORED CHART***", ""]
+        desc_lines.append(f"**Original Song:** {original}")
         if description.strip():
             desc_lines += ["", description]
         else:
@@ -288,7 +303,7 @@ class SongInfo(commands.Cog):
             value=f"{diff_emoji} {diff.title()}".strip() or "?",
             inline=False,
         )
-        if combo_count is not None:
+        if not hide_chart and combo_count is not None:
             embed.add_field(name="Combo", value=f"{combo_count:,}", inline=True)
         if play_count is not None:
             embed.add_field(name="Plays", value=f"{play_count:,}", inline=True)
@@ -296,10 +311,10 @@ class SongInfo(commands.Cog):
             embed.add_field(name="FC Rate", value=f"{fc_rate:.1f}%", inline=True)
         if like_count is not None:
             embed.add_field(name="Likes", value=f"{like_count:,}", inline=True)
-        embed.add_field(name="Chart ID", value=f"`{chart_id}`", inline=False)
         if base and base.jacket_url:
             embed.set_thumbnail(url=base.jacket_url)
-        embed.set_image(url="attachment://chart.png")
+        if chart_bytes:
+            embed.set_image(url="attachment://chart.png")
         if refreshed_at:
             embed.set_footer(
                 text=f"Last refreshed {round(time.time() - refreshed_at)}s ago"
@@ -308,12 +323,16 @@ class SongInfo(commands.Cog):
         url = (
             f"{self.bot.sbuga.base}/api/tools/custom_chart"  # type: ignore[union-attr]
             f"?chart_id={chart_id}&region={region}&chart_image=true"
+            f"&mirrored={str(bool(mirror)).lower()}"
         )
         view = LinkButtonView([("Open Chart", url)])
+        file = (
+            discord.File(BytesIO(chart_bytes), "chart.png")
+            if chart_bytes
+            else discord.utils.MISSING
+        )
         await interaction.followup.send(
-            embed=embed,
-            file=discord.File(BytesIO(chart_bytes), "chart.png"),
-            view=view,
+            content=f"`{chart_id}`", embed=embed, file=file, view=view
         )
         view.message = await interaction.original_response()
 
