@@ -156,11 +156,11 @@ def build_cards(cards: list[dict[str, Any]], asset_url: AssetUrl) -> list[Card]:
                     if trainable
                     else None
                 ),
-                cutout_url_normal=asset_url(
-                    f"character/member_cutout_trm/{abn}/normal"
-                ),
+                # member_cutout, not member_cutout_trm: the trimmed variant only ships
+                # for ~700 of the 1405 cards, so newer ones 404.
+                cutout_url_normal=asset_url(f"character/member_cutout/{abn}/normal"),
                 cutout_url_trained=(
-                    asset_url(f"character/member_cutout_trm/{abn}/after_training")
+                    asset_url(f"character/member_cutout/{abn}/after_training")
                     if trainable
                     else None
                 ),

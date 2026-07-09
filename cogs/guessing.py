@@ -139,11 +139,44 @@ class GuessCog(commands.Cog):
         # Guesses are read from chat, so the bot must actually be able to see
         # this channel — user installs can run commands in places it can't.
         if interaction.guild is not None:
-            if not interaction.is_guild_integration():
+            # is_guild_integration() only proves the app is installed here; an
+            # applications.commands-only install has no bot member, so on_message
+            # never fires. guild.me is None in that case (and on the partial guild
+            # a user install falls back to).
+            me = interaction.guild.me if interaction.is_guild_integration() else None
+            if me is None:
                 await interaction.followup.send(
                     embed=embeds.error_embed(
                         "I need to be **in this server** to read guesses. "
                         "Add me to the server, or play in my DMs."
+                    )
+                )
+                return False
+            perms = interaction.channel.permissions_for(me)  # type: ignore[union-attr]
+            missing = [
+                name
+                for name, allowed in (
+                    ("View Channel", perms.view_channel),
+                    # threads gate posting behind a different flag than plain channels
+                    (
+                        "Send Messages",
+                        (
+                            perms.send_messages_in_threads
+                            if isinstance(interaction.channel, discord.Thread)
+                            else perms.send_messages
+                        ),
+                    ),
+                    ("Embed Links", perms.embed_links),
+                    ("Attach Files", perms.attach_files),
+                )
+                if not allowed
+            ]
+            if missing:
+                listed = "\n".join(f"- `{name}`" for name in missing)
+                await interaction.followup.send(
+                    embed=embeds.error_embed(
+                        "I don't have access to this channel. Check my permissions "
+                        f"and try again.\n\n**Permissions Required**\n{listed}"
                     )
                 )
                 return False
