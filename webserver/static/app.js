@@ -8,6 +8,10 @@ const EMBEDDED =
   new URLSearchParams(location.search).has("frame_id");
 const API = EMBEDDED ? "/.proxy" : "";
 
+// the server injects window.__BUILD (the app.js/style.css content hash) into
+// index.html, rendered bottom-right so you can confirm the live build at a glance
+const APP_VERSION = (typeof window !== "undefined" && window.__BUILD) || "dev";
+
 let accessToken = null;
 let currentMode = null;
 let currentRound = null; // active (unfinished) round, else null
@@ -757,6 +761,18 @@ $("spectate-modal").addEventListener("click", (e) => {
   if (e.target === $("spectate-modal")) closeSpectatePicker();
 });
 $("spectate-stop").addEventListener("click", stopSpectating);
+
+// version stamp (also proves which app.js is actually running); inline styles so
+// it shows even if style.css is stale, and it renders before boot in case boot errors
+(function showVersion() {
+  const tag = document.createElement("div");
+  tag.textContent = `v${APP_VERSION}`;
+  tag.style.cssText =
+    "position:fixed;right:6px;bottom:4px;z-index:50;font-size:10px;" +
+    "font-family:ui-monospace,monospace;color:rgba(150,150,150,0.6);" +
+    "pointer-events:none;user-select:none;";
+  document.body.appendChild(tag);
+})();
 
 // cosmetic — must never block the boot flow
 try {

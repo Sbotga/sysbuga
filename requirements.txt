@@ -38,3 +38,6 @@ numpy
 
 # Console
 colorama
+
+# redis
+redis

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator
@@ -8,9 +9,11 @@ from typing import Any, AsyncGenerator
 import aiohttp
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.responses import Response
+from starlette.types import Scope
 
 from data.pjsk import PJSKData
 from database.pool import close_pool, create_pool
@@ -25,6 +28,24 @@ DISCORD_API = "https://discord.com/api/v10"
 
 class TokenBody(BaseModel):
     code: str
+
+
+# our own hand-edited files change on every deploy and aren't filename-hashed, so
+# they must revalidate (no-cache) or a stale app.js gets served; everything else
+# (the vendored SDK, images) is stable and can edge-cache normally.
+_REVALIDATE = {"app.js", "style.css", "sbuga.js"}
+
+
+class NoCacheStatic(StaticFiles):
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        content_type = response.headers.get("content-type", "")
+        name = path.rsplit("/", 1)[-1]
+        if content_type.startswith("text/html") or name in _REVALIDATE:
+            response.headers["Cache-Control"] = "no-cache"
+        else:
+            response.headers.setdefault("Cache-Control", "public, max-age=86400")
+        return response
 
 
 def _client_id(config: Config) -> str:
@@ -156,7 +177,59 @@ def create_app() -> FastAPI:
         return FileResponse(font_dir / name, media_type="font/otf")
 
     static_dir = Path(__file__).parent / "static"
-    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+
+    # Fingerprint the two entry assets index.html references. A content change makes
+    # a new filename, so the hashed files cache immutably (full CDN/browser caching)
+    # while index.html stays no-cache and points at the current names — instant
+    # deploys with no purging. Assets are read + hashed once at startup, so restart
+    # the service after deploying. The combined hash is injected as the build id.
+    entry_media = {"app.js": "text/javascript", "style.css": "text/css"}
+    hashed_name: dict[str, str] = {}
+    asset_body: dict[str, tuple[bytes, str]] = {}
+    combined = hashlib.sha1()
+    for original, media in entry_media.items():
+        data = (static_dir / original).read_bytes()
+        combined.update(data)
+        stem, _, ext = original.rpartition(".")
+        name = f"{stem}_{hashlib.sha1(data).hexdigest()[:8]}.{ext}"
+        hashed_name[original] = name
+        asset_body[name] = (data, media)
+    build_id = combined.hexdigest()[:8]
+
+    index_html = (static_dir / "index.html").read_text(encoding="utf-8")
+    index_html = index_html.replace('src="app.js"', f'src="{hashed_name["app.js"]}"')
+    index_html = index_html.replace(
+        'href="style.css"', f'href="{hashed_name["style.css"]}"'
+    )
+    index_html = index_html.replace(
+        "</head>", f'  <script>window.__BUILD="{build_id}";</script>\n</head>'
+    )
+
+    async def index() -> HTMLResponse:
+        return HTMLResponse(index_html, headers={"Cache-Control": "no-cache"})
+
+    app.add_api_route("/", index, include_in_schema=False)
+    app.add_api_route("/index.html", index, include_in_schema=False)
+
+    def _asset_endpoint(data: bytes, media: str):
+        async def endpoint() -> Response:
+            return Response(
+                content=data,
+                media_type=media,
+                headers={"Cache-Control": "public, max-age=31536000, immutable"},
+            )
+
+        return endpoint
+
+    for name, (data, media) in asset_body.items():
+        app.add_api_route(
+            f"/{name}", _asset_endpoint(data, media), include_in_schema=False
+        )
+
+    # everything else (the vendored SDK, images, sbuga.js) via static; sbuga.js is
+    # imported by app.js under its real name and isn't fingerprinted, so it stays
+    # no-cache (see NoCacheStatic), the rest edge-caches.
+    app.mount("/", NoCacheStatic(directory=static_dir, html=True), name="static")
     return app
 
 
