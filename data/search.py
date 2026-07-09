@@ -494,6 +494,12 @@ def _best_entity(
     return None if best_id is None else (best_id, best_key)
 
 
+def song_keys(music_id: int) -> list[str]:
+    """Every key the song matcher accepts for this song — title, aliases, and all
+    generated romanizations. Already preprocessed."""
+    return sorted(k for k, ids in _playlist_map.items() if music_id in ids)
+
+
 def best_song_match_key(query: str, sensitivity: float = 0.6) -> tuple[int, str] | None:
     """The matched song id along with the key (title or alias) that matched it."""
     return _best_entity(_playlist_map, _playlist_alias_map, query, sensitivity)

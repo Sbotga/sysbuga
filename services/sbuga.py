@@ -44,10 +44,13 @@ __all__ = [
 
 
 class SbugaError(Exception):
-    def __init__(self, status: int, detail: str = "") -> None:
+    def __init__(self, status: int, detail: Any = "") -> None:
         self.status = status
-        self.detail = detail
-        super().__init__(f"sbuga API error {status}: {detail}")
+        # some errors (e.g. a taken alias) return a structured detail; keep `detail`
+        # a plain code string so existing messages stay readable, and expose the rest
+        self.data: dict[str, Any] = detail if isinstance(detail, dict) else {}
+        self.detail: str = str(self.data.get("code", "")) if self.data else str(detail)
+        super().__init__(f"sbuga API error {status}: {self.detail}")
 
 
 class SbugaUnavailable(SbugaError):
@@ -320,11 +323,12 @@ def _clean(params: dict[str, Any] | None) -> dict[str, Any] | None:
     return {k: v for k, v in params.items() if v is not None}
 
 
-async def _detail(resp: aiohttp.ClientResponse) -> str:
+async def _detail(resp: aiohttp.ClientResponse) -> Any:
+    """The raw `detail` — a code string, or a dict for structured errors."""
     try:
         body = await resp.json()
         if isinstance(body, dict):
-            return str(body.get("detail", body))
-        return str(body)
+            return body.get("detail", body)
+        return body
     except Exception:
         return ""

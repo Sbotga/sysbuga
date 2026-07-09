@@ -259,6 +259,10 @@ class PJSKData:
         """The matched song id plus the key (title or alias) that matched it."""
         return search.best_song_match_key(query)
 
+    def song_keys(self, music_id: int) -> list[str]:
+        """Every key the matcher accepts for this song (title, aliases, romanizations)."""
+        return search.song_keys(music_id)
+
     def best_event_id(self, query: str) -> int | None:
         return search.best_event_match(query)
 

@@ -8,6 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from data.search import preprocess
 from helpers import converters, embeds
 from helpers.autocompletes import autocompletes
 from helpers.config_loader import get_config
@@ -46,6 +47,23 @@ class InfoCog(commands.Cog):
         role_ids = set(self.bot.config["discord"].get("alias_manager_role_ids", []))
         user_roles = {r.id for r in getattr(user, "roles", [])}
         return bool(role_ids & user_roles)
+
+    def _alias_error_embed(self, error: SbugaError, alias: str) -> discord.Embed:
+        """Aliases are unique across every song, so name the one already holding it."""
+        if error.detail == "alias_taken":
+            music_id = error.data.get("music_id")
+            other = self.bot.pjsk.get_music(music_id) if music_id else None  # type: ignore[union-attr]
+            where = (
+                f"**{other.title}** (ID `{other.id}`)"
+                if other
+                else f"song ID `{music_id}`"
+            )
+            return embeds.error_embed(
+                f"`{alias}` is already an alias for {where}.\n"
+                "Remove it from that song before adding it here.",
+                title="Alias already taken",
+            )
+        return embeds.error_embed(f"Couldn't add alias: {error.detail or error.status}")
 
     async def _deny_alias_edit(self, interaction: discord.Interaction) -> bool:
         """Reply and return True if this caller may not edit aliases here."""
@@ -350,16 +368,20 @@ class InfoCog(commands.Cog):
                 embed=embeds.error_embed(f"Couldn't find a song matching `{song}`.")
             )
             return
-        try:
-            await self.bot.sbuga.add_song_alias(music.id, alias.lower())  # type: ignore[union-attr]
-        except SbugaError as e:
+        target = preprocess(alias)
+        if not target:
             await interaction.followup.send(
-                embed=embeds.error_embed(f"Couldn't add alias: {e.detail or e.status}")
+                embed=embeds.error_embed("That alias is empty after normalisation.")
             )
+            return
+        try:
+            await self.bot.sbuga.add_song_alias(music.id, target)  # type: ignore[union-attr]
+        except SbugaError as e:
+            await interaction.followup.send(embed=self._alias_error_embed(e, target))
             return
         await interaction.followup.send(
             embed=embeds.success_embed(
-                f"Added alias for `{music.title}` (ID `{music.id}`)\nAlias: `{alias.lower()}`",
+                f"Added alias for `{music.title}` (ID `{music.id}`)\nAlias: `{target}`",
                 title="Added alias!",
             )
         )
@@ -379,7 +401,8 @@ class InfoCog(commands.Cog):
                 embed=embeds.error_embed(f"Couldn't find a song matching `{song}`.")
             )
             return
-        target = alias.lower().strip()
+        # aliases are stored preprocessed, so normalise the input the same way
+        target = preprocess(alias)
         try:
             existing = await self.bot.sbuga.get_song_aliases()  # type: ignore[union-attr]
             match = next(
