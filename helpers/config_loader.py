@@ -7,6 +7,7 @@ class ConfigDiscord(TypedDict):
     name: str
     token: str
     client_secret: str
+    client_id: NotRequired[str]
     owner_ids: list[int]
     support_invite: str
     support_id: int
@@ -27,6 +28,14 @@ class ConfigAPI(TypedDict):
     host: str
     port: int
     url: str
+    workers: NotRequired[int]
+
+
+class ConfigRedis(TypedDict):
+    host: str
+    port: int
+    db: int
+    password: NotRequired[str]
 
 
 class ConfigPSQL(TypedDict):
@@ -47,6 +56,7 @@ class Config(TypedDict):
     discord: ConfigDiscord
     sbuga: ConfigSbuga
     api: NotRequired[ConfigAPI]
+    redis: NotRequired[ConfigRedis]
     psql: ConfigPSQL
     migrate: NotRequired[ConfigMigrate]
 

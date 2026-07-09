@@ -15,6 +15,19 @@ let timerHandle = null;
 let theme = "dark";
 let appName = "SYSbuga";
 
+// --- spectate / presence state ---
+let hubWs = null;
+let selfId = null; // our user id as a string snowflake (JS numbers lose precision)
+let selfName = "Player";
+let selfAvatar = null; // discord avatar hash (or null)
+let instanceId = ""; // discord activity instance id (the room key)
+let roomMembers = []; // [{id, name, avatar, active}] everyone connected to this instance
+let spectateTarget = null; // id we're currently watching, or null
+let spectateTimerHandle = null;
+let hubClosing = false;
+let heartbeatHandle = null;
+let lastRoundPayload = null; // last round we broadcast, replayed after a reconnect
+
 const $ = (id) => document.getElementById(id);
 
 const TITLES = { setup: "Guessing" };
@@ -24,7 +37,7 @@ function show(screen) {
   $(`screen-${screen}`).classList.add("active");
 
   const bar = $("topbar");
-  if (screen === "loading" || screen === "round") {
+  if (screen === "loading" || screen === "round" || screen === "spectate") {
     bar.hidden = true;
   } else {
     bar.hidden = false;
@@ -150,7 +163,15 @@ async function boot() {
     body: JSON.stringify({ code }),
   });
   accessToken = token.access_token;
-  await sdk.commands.authenticate({ access_token: accessToken });
+  const auth = await sdk.commands.authenticate({ access_token: accessToken });
+  if (auth && auth.user) {
+    selfId = String(auth.user.id);
+    selfName = auth.user.global_name || auth.user.username || "Player";
+    selfAvatar = auth.user.avatar || null;
+  }
+  instanceId = sdk.instanceId || "";
+  connectHub();
+  initPresence(sdk).catch(() => {}); // best-effort; the room is the real source
 
   try {
     const settings = await api("/api/activity/settings");
@@ -206,15 +227,20 @@ function setFormEnabled(on) {
   $("btn-hint").disabled = !on;
 }
 
-function logEntry(icon, text, cls) {
+function appendLog(logEl, icon, text, cls) {
   const li = document.createElement("li");
   li.className = cls;
   li.innerHTML = `<span class="marker"></span><span class="text"></span>`;
   li.querySelector(".marker").textContent = icon;
   li.querySelector(".text").textContent = text;
-  const log = $("guess-log");
-  log.append(li);
-  log.scrollTop = log.scrollHeight;
+  logEl.append(li);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// player's own guess log entry — mirror it to anyone spectating us
+function playerLog(icon, text, cls) {
+  appendLog($("guess-log"), icon, text, cls);
+  hubSend({ op: "log", entry: { marker: icon, text, cls } });
 }
 
 async function startRound(mode) {
@@ -244,6 +270,8 @@ async function startRound(mode) {
     $("round-prompt").textContent = `Couldn't start: ${e.message}`;
     $("guess-form").hidden = true;
     $("btn-again").hidden = false;
+    lastRoundPayload = null;
+    hubSend({ op: "clear" });
     return;
   }
 
@@ -258,6 +286,16 @@ async function startRound(mode) {
   $("btn-giveup").hidden = false;
   $("guess-input").focus();
   startTimer(round.expires_at);
+  lastRoundPayload = {
+    round_id: round.round_id,
+    mode: round.mode,
+    mode_label: $("round-mode").textContent,
+    prompt: round.prompt,
+    has_image: round.has_image,
+    has_reveal: round.has_reveal,
+    expires_at: round.expires_at,
+  };
+  hubSend({ op: "round", round: lastRoundPayload });
 }
 
 function showReveal(round, message, cls) {
@@ -275,6 +313,15 @@ function showReveal(round, message, cls) {
     img.src = `${API}/api/activity/guess/round/${round.round_id}/reveal`;
     img.hidden = false;
   }
+  hubSend({
+    op: "result",
+    result: {
+      text: message,
+      cls: cls || "",
+      round_id: round.round_id,
+      has_reveal: !!round.has_reveal,
+    },
+  });
 }
 
 async function submitGuess(event) {
@@ -295,16 +342,17 @@ async function submitGuess(event) {
   }
 
   if (result.result === "correct") {
-    logEntry("✅", guess, "right");
+    playerLog("✅", guess, "right");
     showReveal({ ...currentRound, ...result }, `Correct! It was ${result.answer}.`, "good");
   } else if (result.result === "expired") {
     showReveal({ ...currentRound, ...result }, `Time's up! It was ${result.answer}.`, "bad");
   } else if (result.result === "incorrect") {
-    logEntry("❌", result.matched, "wrong");
+    playerLog("❌", result.matched, "wrong");
     $("guess-input").value = "";
+    hubSend({ op: "typing", text: "" });
     $("guess-input").focus();
   } else {
-    logEntry("❔", guess, "miss");
+    playerLog("❔", guess, "miss");
     $("guess-input").select();
   }
 }
@@ -342,10 +390,332 @@ async function useHint() {
       method: "POST",
       body: JSON.stringify({ round_id: currentRound.round_id }),
     });
-    logEntry("💡", `${res.hint}  (${res.length} chars)`, "hint");
+    playerLog("💡", `${res.hint}  (${res.length} chars)`, "hint");
   } catch (e) {
     setResult(e.message, "bad");
   }
+}
+
+// --- spectate hub (websocket) ---
+
+function hubUrl() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${location.host}${API}/api/activity/ws`;
+}
+
+function hubSend(obj) {
+  if (hubWs && hubWs.readyState === WebSocket.OPEN) {
+    try {
+      hubWs.send(JSON.stringify(obj));
+    } catch {}
+  }
+}
+
+function connectHub() {
+  if (!accessToken || !instanceId) return; // need auth + a room to join
+  try {
+    hubWs = new WebSocket(hubUrl());
+  } catch {
+    return;
+  }
+  hubWs.addEventListener("open", () => {
+    hubSend({
+      op: "hello",
+      token: accessToken,
+      instance_id: instanceId,
+      name: selfName,
+      avatar: selfAvatar,
+    });
+    // re-sync state after a reconnect: rejoin resets our server-side state, so
+    // replay what we're doing (watching someone / mid-round) to reattach spectators
+    if (spectateTarget) hubSend({ op: "watch", target: spectateTarget });
+    if (currentRound && lastRoundPayload) hubSend({ op: "round", round: lastRoundPayload });
+    startHeartbeat();
+  });
+  hubWs.addEventListener("message", (e) => {
+    let msg;
+    try {
+      msg = JSON.parse(e.data);
+    } catch {
+      return;
+    }
+    onHubMessage(msg);
+  });
+  hubWs.addEventListener("close", () => {
+    hubWs = null;
+    stopHeartbeat();
+    if (!hubClosing) setTimeout(connectHub, 2000); // reconnect
+  });
+  hubWs.addEventListener("error", () => {});
+}
+
+// keep the socket alive through Cloudflare/nginx idle timeouts (unknown ops are
+// ignored server-side); the reconnect loop covers us if a drop slips through
+function startHeartbeat() {
+  stopHeartbeat();
+  heartbeatHandle = setInterval(() => hubSend({ op: "ping" }), 30000);
+}
+function stopHeartbeat() {
+  if (heartbeatHandle) clearInterval(heartbeatHandle);
+  heartbeatHandle = null;
+}
+
+function onHubMessage(msg) {
+  switch (msg.op) {
+    case "ready":
+      selfId = msg.you;
+      break;
+    case "members":
+      roomMembers = msg.members || [];
+      if (!$("spectate-modal").hidden) renderSpectateList();
+      break;
+    case "watchers":
+      renderWatchers(msg.watchers || []);
+      break;
+    case "snapshot":
+      if (spectateTarget === msg.target) renderSnapshot(msg.state);
+      break;
+    case "round":
+      if (spectateTarget === msg.from) spectateRound(msg.round);
+      break;
+    case "typing":
+      if (spectateTarget === msg.from) spectateTyping(msg.text);
+      break;
+    case "log":
+      if (spectateTarget === msg.from) appendLog($("spectate-log"), msg.entry.marker, msg.entry.text, msg.entry.cls);
+      break;
+    case "result":
+      if (spectateTarget === msg.from) spectateResult(msg.result);
+      break;
+    case "clear":
+      if (spectateTarget === msg.from) spectateCleared();
+      break;
+    case "watch_target_gone":
+      if (spectateTarget === msg.target) spectateGone();
+      break;
+  }
+}
+
+// throttle live typing so we send at most ~1 update per 120ms (with a trailing send)
+let typingTimer = null;
+let lastTypingSent = 0;
+function throttleTyping(text) {
+  const gap = 120;
+  const now = Date.now();
+  clearTimeout(typingTimer);
+  if (now - lastTypingSent >= gap) {
+    lastTypingSent = now;
+    hubSend({ op: "typing", text });
+  } else {
+    typingTimer = setTimeout(() => {
+      lastTypingSent = Date.now();
+      hubSend({ op: "typing", text: $("guess-input").value });
+    }, gap);
+  }
+}
+
+// best-effort SDK presence: satisfies "see everyone in this activity" and gives us
+// a name/avatar fallback. The websocket room stays the authoritative watch list.
+async function initPresence(sdk) {
+  const apply = (list) => {
+    for (const p of list || []) {
+      const id = String(p.id);
+      if (roomMembers.some((m) => m.id === id)) continue;
+      // surface participants who haven't opened their socket yet as "not playing"
+      const name = p.global_name || p.nickname || p.username || "Player";
+      const avatar = p.avatar
+        ? `/api/activity/avatar/${id}?h=${p.avatar}`
+        : `/api/activity/avatar/${id}`;
+      roomMembers.push({ id, name, avatar, active: false });
+    }
+    if (!$("spectate-modal").hidden) renderSpectateList();
+  };
+  const res = await sdk.commands.getInstanceConnectedParticipants();
+  apply(res.participants);
+  try {
+    sdk.subscribe("ACTIVITY_INSTANCE_PARTICIPANTS_UPDATE", (e) => apply(e.participants));
+  } catch {}
+}
+
+// --- watcher badges (people spectating me) ---
+
+function renderWatchers(list) {
+  const box = $("watchers");
+  box.innerHTML = "";
+  const shown = list.slice(0, 4);
+  for (const w of shown) {
+    const d = document.createElement("div");
+    d.className = "watcher";
+    d.title = `${w.name} is watching`;
+    d.innerHTML =
+      `<img alt="" /><span class="eye"><svg class="icon" viewBox="0 0 24 24"><use href="#i-eye" /></svg></span>`;
+    d.querySelector("img").src = `${API}${w.avatar}`;
+    box.appendChild(d);
+  }
+  if (list.length > shown.length) {
+    const more = document.createElement("span");
+    more.className = "more";
+    more.textContent = `+${list.length - shown.length}`;
+    box.appendChild(more);
+  }
+}
+
+// --- spectate picker ---
+
+function openSpectatePicker() {
+  renderSpectateList();
+  $("spectate-modal").hidden = false;
+}
+function closeSpectatePicker() {
+  $("spectate-modal").hidden = true;
+}
+
+function renderSpectateList() {
+  const list = $("spectate-list");
+  list.innerHTML = "";
+  const others = roomMembers
+    .filter((m) => m.id !== selfId)
+    .sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0));
+  for (const m of others) {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.className = "spectate-item";
+    btn.disabled = !m.active;
+    btn.innerHTML =
+      `<img alt="" /><span class="who"><span class="name"></span><span class="mode"></span></span>`;
+    btn.querySelector("img").src = `${API}${m.avatar}`;
+    btn.querySelector(".name").textContent = m.name;
+    btn.querySelector(".mode").textContent = m.active ? "Playing now" : "Not playing";
+    if (m.active)
+      btn.addEventListener("click", () => {
+        closeSpectatePicker();
+        startSpectating(m.id, m.name);
+      });
+    li.appendChild(btn);
+    list.appendChild(li);
+  }
+}
+
+// --- spectate view ---
+
+function startSpectating(id, name) {
+  spectateTarget = id;
+  resetSpectateView();
+  $("spectate-title").textContent = `Watching ${name || "…"}`;
+  show("spectate");
+  hubSend({ op: "watch", target: id });
+}
+
+function stopSpectating() {
+  if (spectateTarget) hubSend({ op: "watch", target: null });
+  spectateTarget = null;
+  stopSpectateTimer();
+  show("home");
+}
+
+function resetSpectateView() {
+  $("spectate-prompt").textContent = "";
+  const img = $("spectate-image");
+  img.hidden = true;
+  img.removeAttribute("src");
+  $("spectate-typing").innerHTML = "";
+  $("spectate-result").textContent = "";
+  $("spectate-result").className = "";
+  $("spectate-log").innerHTML = "";
+  $("spectate-timer").hidden = true;
+  stopSpectateTimer();
+}
+
+function applySpectateRound(round) {
+  if (!round) return;
+  $("spectate-prompt").textContent = round.prompt || "";
+  const img = $("spectate-image");
+  if (round.has_image && round.round_id) {
+    img.src = `${API}/api/activity/guess/round/${round.round_id}/image`;
+    img.hidden = false;
+  } else {
+    img.hidden = true;
+    img.removeAttribute("src");
+  }
+  if (round.expires_at) startSpectateTimer(round.expires_at);
+  else $("spectate-timer").hidden = true;
+}
+
+function renderSnapshot(state) {
+  resetSpectateView();
+  if (!state || !state.round) {
+    spectateCleared();
+    return;
+  }
+  applySpectateRound(state.round);
+  for (const e of state.log || []) appendLog($("spectate-log"), e.marker, e.text, e.cls);
+  spectateTyping(state.typing || "");
+  if (state.result) spectateResult(state.result);
+}
+
+function spectateRound(round) {
+  $("spectate-log").innerHTML = "";
+  $("spectate-typing").innerHTML = "";
+  $("spectate-result").textContent = "";
+  $("spectate-result").className = "";
+  applySpectateRound(round);
+}
+
+function spectateTyping(text) {
+  const el = $("spectate-typing");
+  el.innerHTML = "";
+  if (text) {
+    el.textContent = text;
+    const caret = document.createElement("span");
+    caret.className = "caret";
+    el.appendChild(caret);
+  }
+}
+
+function spectateResult(result) {
+  stopSpectateTimer();
+  $("spectate-timer").hidden = true;
+  $("spectate-typing").innerHTML = "";
+  const el = $("spectate-result");
+  el.textContent = result.text || "";
+  el.className = result.cls || "";
+  if (result.has_reveal && result.round_id) {
+    const img = $("spectate-image");
+    img.src = `${API}/api/activity/guess/round/${result.round_id}/reveal`;
+    img.hidden = false;
+  }
+}
+
+function spectateCleared() {
+  resetSpectateView();
+  $("spectate-prompt").textContent = "They're not in a round right now.";
+}
+
+function spectateGone() {
+  stopSpectateTimer();
+  spectateTarget = null;
+  resetSpectateView();
+  $("spectate-prompt").textContent = "They left the activity.";
+  $("spectate-result").textContent = "Go back to pick someone else.";
+}
+
+function startSpectateTimer(expiresAt) {
+  stopSpectateTimer();
+  const el = $("spectate-timer");
+  el.hidden = false;
+  const tick = () => {
+    const left = Math.max(0, expiresAt - Date.now() / 1000);
+    el.textContent = `${Math.ceil(left)}s`;
+    el.classList.toggle("low", left <= 10);
+    if (left <= 0) stopSpectateTimer();
+  };
+  tick();
+  spectateTimerHandle = setInterval(tick, 250);
+}
+
+function stopSpectateTimer() {
+  if (spectateTimerHandle) clearInterval(spectateTimerHandle);
+  spectateTimerHandle = null;
 }
 
 // --- wiring ---
@@ -365,13 +735,28 @@ $("btn-hint").addEventListener("click", useHint);
 $("btn-giveup").addEventListener("click", giveUp);
 
 $("btn-quit").addEventListener("click", async () => {
-  if (!currentRound) return show("setup"); // already revealed
+  if (!currentRound) {
+    lastRoundPayload = null;
+    hubSend({ op: "clear" }); // already revealed — stop broadcasting the finished round
+    return show("setup");
+  }
   if (await confirmModal("Quit this round?", "Quit", "Keep playing")) {
     stopTimer();
     currentRound = null;
+    lastRoundPayload = null;
+    hubSend({ op: "clear" });
     show("setup");
   }
 });
+
+// live typing broadcast + spectate controls
+$("guess-input").addEventListener("input", () => throttleTyping($("guess-input").value));
+$("btn-spectate").addEventListener("click", openSpectatePicker);
+$("spectate-close").addEventListener("click", closeSpectatePicker);
+$("spectate-modal").addEventListener("click", (e) => {
+  if (e.target === $("spectate-modal")) closeSpectatePicker();
+});
+$("spectate-stop").addEventListener("click", stopSpectating);
 
 // cosmetic — must never block the boot flow
 try {

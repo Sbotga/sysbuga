@@ -2,6 +2,7 @@ discord:
   name: "SYSbuga"                 # display name in embeds/images
   token: ""
   client_secret: ""               # OAuth2 client secret
+  client_id: ""                   # OAuth2/application id; blank = derived from the bot token
   owner_ids: []
   support_invite: ""
   support_id: 0                   # support server guild id
@@ -16,11 +17,18 @@ sbuga:
   regions: ["en", "jp", "kr", "tw"]  # merge priority order
   refresh_interval: 300           # seconds between data-version polls
 
-api:                              # public API server
+api:                              # standalone activity server (webserver/activity_app.py)
   enabled: false
   host: "0.0.0.0"
   port: 8039
   url: ""                         # public base url; doubles as the OAuth redirect (register it in the dev portal)
+  workers: 2                      # uvicorn worker processes; each holds its own PJSK data copy
+
+redis:                            # shared state for the multi-worker activity server
+  host: "127.0.0.1"
+  port: 6379
+  db: 0
+  password: ""                    # blank = no auth
 
 psql:
   host: "127.0.0.1"

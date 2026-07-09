@@ -18,7 +18,6 @@ from helpers.config_loader import Config, get_config, set_config_path
 from helpers.emojis import emojis
 from helpers.logging import LOGGING
 from services.sbuga import SbugaClient
-from webserver import start_webserver, stop_webserver
 
 COGS_DIR = "cogs"
 
@@ -78,7 +77,6 @@ class SbugaBot(commands.Bot):
             self.warn(f"Emoji load failed: {e}")
 
         await self._load_cogs()
-        await start_webserver(self)
 
     async def _load_cogs(self) -> None:
         for path in sorted(glob.glob(os.path.join(COGS_DIR, "*.py"))):
@@ -99,7 +97,6 @@ class SbugaBot(commands.Bot):
         self.print(f"Discord | Logged in as {self.user} ({self.user.id})")
 
     async def close(self) -> None:
-        await stop_webserver()
         if self.pjsk:
             await self.pjsk.stop()
         if self.sbuga:
