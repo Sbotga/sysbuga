@@ -49,10 +49,27 @@ def _strip_diacritics(text: str) -> str:
 
 
 CACHE_FILE = "cache/search_maps.json"
+CACHE_VERSION = 2  # bump when the cache shape changes (e.g. added alias maps)
+
+
+def _is_invisible(ch: str) -> bool:
+    # zero-width / control / bidi format chars (Cc, Cf) plus the Tags block (U+E0000
+    # tag space some clients like 7TV inject — it's unassigned/Cn, so category alone
+    # misses it) and variation selectors. Strips invisible junk that makes two
+    # identical-looking strings (e.g. アリア vs アリア) miss a match.
+    if unicodedata.category(ch) in ("Cc", "Cf"):
+        return True
+    o = ord(ch)
+    return (
+        0xE0000 <= o <= 0xE007F  # Tags
+        or 0xFE00 <= o <= 0xFE0F  # variation selectors
+        or 0xE0100 <= o <= 0xE01EF  # variation selectors supplement
+    )
 
 
 def preprocess(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
+    text = "".join(c for c in text if not _is_invisible(c))
     text = text.lower().strip()
     STAR_LIKE = (
         r"[☀-⛿"
@@ -110,6 +127,12 @@ _search_map: dict[str, set[LevelKey]] = {}
 _vocal_id_map: dict[str, set[LevelKey]] = {}
 _playlist_map: dict[str, set[int]] = {}
 _event_map: dict[str, set[int]] = {}
+# key -> ids for which that key is ONLY an alias (title/name variant), not the real
+# title/name or a romanization of it. Used to prefer real-title matches on ties, so
+# e.g. "aria" resolves to the song *titled* アリア over one merely aliased "aria".
+_playlist_alias_map: dict[str, set[int]] = {}
+_event_alias_map: dict[str, set[int]] = {}
+ALIAS_PENALTY = 3.0  # slight; only flips near-ties toward the real title
 _all_artists: list[str] = []
 _all_captions: list[str] = []
 _min_level: int = 1
@@ -134,11 +157,14 @@ def _add_playlist_keys(keys: list[str], music_ids: list[int]) -> None:
 def _save_to_disk() -> None:
     os.makedirs("cache", exist_ok=True)
     data = {
+        "cache_version": CACHE_VERSION,
         "versions": _cached_versions,
         "search_map": {k: [list(lk) for lk in v] for k, v in _search_map.items()},
         "vocal_id_map": {k: [list(lk) for lk in v] for k, v in _vocal_id_map.items()},
         "playlist_map": {k: list(v) for k, v in _playlist_map.items()},
         "event_map": {k: list(v) for k, v in _event_map.items()},
+        "playlist_alias_map": {k: list(v) for k, v in _playlist_alias_map.items()},
+        "event_alias_map": {k: list(v) for k, v in _event_alias_map.items()},
         "all_artists": _all_artists,
         "all_captions": _all_captions,
         "min_level": _min_level,
@@ -150,12 +176,15 @@ def _save_to_disk() -> None:
 
 def _load_from_disk() -> bool:
     global _search_map, _vocal_id_map, _playlist_map, _event_map
+    global _playlist_alias_map, _event_alias_map
     global _all_artists, _all_captions, _min_level, _max_level, _cached_versions
     if not os.path.exists(CACHE_FILE):
         return False
     try:
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
+        if data.get("cache_version") != CACHE_VERSION:
+            return False  # stale format -> force a rebuild
         _cached_versions = data.get("versions", {})
         _search_map = {
             k: {tuple(lk) for lk in v} for k, v in data.get("search_map", {}).items()
@@ -165,6 +194,12 @@ def _load_from_disk() -> bool:
         }
         _playlist_map = {k: set(v) for k, v in data.get("playlist_map", {}).items()}
         _event_map = {k: set(v) for k, v in data.get("event_map", {}).items()}
+        _playlist_alias_map = {
+            k: set(v) for k, v in data.get("playlist_alias_map", {}).items()
+        }
+        _event_alias_map = {
+            k: set(v) for k, v in data.get("event_alias_map", {}).items()
+        }
         _all_artists = data.get("all_artists", [])
         _all_captions = data.get("all_captions", [])
         _min_level = data.get("min_level", 1)
@@ -196,6 +231,7 @@ def build_search_maps(
     _search_map.clear()
     _vocal_id_map.clear()
     _playlist_map.clear()
+    _playlist_alias_map.clear()
 
     all_artists_set: set[str] = set()
     all_captions_set: set[str] = set()
@@ -209,23 +245,36 @@ def build_search_maps(
             for diff in music.difficulties:
                 all_level_keys.append((music.id, vocal.id, diff.difficulty))
 
-        all_title_keys: list[str] = []
+        # real titles (title + pronunciation, all regions) vs aliases (title_variants)
+        real_titles: list[str] = []
+        alias_titles: list[str] = []
         for source_list in music_data.values():
             for m in source_list:
                 if m.id == music.id:
-                    all_title_keys.append(m.title)
+                    real_titles.append(m.title)
                     if m.pronunciation:
-                        all_title_keys.append(m.pronunciation)
-                    all_title_keys.extend(m.title_variants)
-        all_title_keys.extend(music.title_variants)
-        all_title_keys.append(music.title)
+                        real_titles.append(m.pronunciation)
+                    alias_titles.extend(m.title_variants)
+        alias_titles.extend(music.title_variants)
+        real_titles.append(music.title)
         if music.pronunciation:
-            all_title_keys.append(music.pronunciation)
-        for title in list(dict.fromkeys(all_title_keys)):
-            all_title_keys.extend(_romanize(title))
-        deduped_titles = list(dict.fromkeys(all_title_keys))
+            real_titles.append(music.pronunciation)
+
+        real_keys = list(real_titles)
+        for t in list(dict.fromkeys(real_titles)):
+            real_keys.extend(_romanize(t))
+        alias_keys = list(alias_titles)
+        for t in list(dict.fromkeys(alias_titles)):
+            alias_keys.extend(_romanize(t))
+
+        real_pp = {preprocess(k) for k in real_keys if preprocess(k)}
+        alias_pp = {preprocess(k) for k in alias_keys if preprocess(k)}
+        deduped_titles = list(real_pp | alias_pp)
         _add_keys(deduped_titles, all_level_keys)
         _add_playlist_keys(deduped_titles, mid_list)
+        # keys that are ONLY an alias for this song (not also its real title)
+        for k in alias_pp - real_pp:
+            _playlist_alias_map.setdefault(k, set()).update(mid_list)
 
         _add_keys([str(music.id)], all_level_keys)
         _add_playlist_keys([str(music.id)], mid_list)
@@ -302,17 +351,25 @@ def build_search_maps(
 
 def build_event_search_map(events: list[Event]) -> None:
     _event_map.clear()
+    _event_alias_map.clear()
     for event in events:
-        keys = [event.name, *event.name_variants, str(event.id)]
+        real = [event.name, str(event.id)]
         if event.pronunciation:
-            keys.append(event.pronunciation)
-        for source in [event.name, event.pronunciation, *event.name_variants]:
+            real.append(event.pronunciation)
+        for source in [event.name, event.pronunciation]:
             if source:
-                keys.extend(_romanize(source))
-        for key in keys:
-            pk = preprocess(key)
-            if pk:
-                _event_map.setdefault(pk, set()).add(event.id)
+                real.extend(_romanize(source))
+        alias = list(event.name_variants)
+        for source in event.name_variants:
+            if source:
+                alias.extend(_romanize(source))
+
+        real_pp = {preprocess(k) for k in real if preprocess(k)}
+        alias_pp = {preprocess(k) for k in alias if preprocess(k)}
+        for pk in real_pp | alias_pp:
+            _event_map.setdefault(pk, set()).add(event.id)
+        for pk in alias_pp - real_pp:
+            _event_alias_map.setdefault(pk, set()).add(event.id)
     if _search_map:
         _save_to_disk()
     print(f"[Search] Event maps built: {len(_event_map)} keys")
@@ -339,7 +396,13 @@ def _score_key(variants: list[str], key: str) -> tuple[float, int]:
     return best_sim, best_dist
 
 
-def _fuzzy(scope: dict[str, set], query: str, sensitivity: float, limit: int):
+def _fuzzy(
+    scope: dict[str, set],
+    query: str,
+    sensitivity: float,
+    limit: int,
+    alias_map: dict[str, set[int]] | None = None,
+):
     if not scope or not query.strip():
         return []
 
@@ -352,10 +415,14 @@ def _fuzzy(scope: dict[str, set], query: str, sensitivity: float, limit: int):
         similarity, edit_distance = _score_key(variants, key)
 
         if similarity >= sensitivity_100:
+            aliased = alias_map.get(key, ()) if alias_map else ()
             for i in ids:
-                penalized = (
-                    similarity * 0.9 if i in _vocal_id_map.get(key, ()) else similarity
-                )
+                if i in _vocal_id_map.get(key, ()):
+                    penalized = similarity * 0.9
+                elif i in aliased:
+                    penalized = similarity - ALIAS_PENALTY
+                else:
+                    penalized = similarity
                 if (
                     i not in scores
                     or penalized > scores[i]
@@ -369,18 +436,25 @@ def _fuzzy(scope: dict[str, set], query: str, sensitivity: float, limit: int):
     return sorted(scores.keys(), key=lambda i: (-scores[i], distances[i]))[:limit]
 
 
-def _best_key(scope: dict[str, set], query: str, sensitivity: float) -> str | None:
-    """Sbotga-style single-best matcher: one winning key by token_set_ratio
-    with an edit-distance penalty, ties broken by edit distance."""
+def _best_entity(
+    scope: dict[str, set],
+    alias_map: dict[str, set[int]],
+    query: str,
+    sensitivity: float,
+) -> int | None:
+    """Single best id: token_set_ratio with an edit-distance penalty, plus a slight
+    penalty when the matched key is only an *alias* for that id — so the song/event
+    the key is the real title of wins a tie over one merely aliased to it. Ties are
+    otherwise broken by edit distance, then lowest id (matching the old min())."""
     if not scope or not query.strip():
         return None
     variants = _query_variants(query)
     sensitivity_100 = sensitivity * 100
-    best_key: str | None = None
-    best_score: float = 0.0
+    best_id: int | None = None
+    best_score = -1.0
     best_distance = 10**9
 
-    for key in scope:
+    for key, ids in scope.items():
         similarity: float = -1.0
         edit_distance = 10**9
         for q in variants:
@@ -393,27 +467,24 @@ def _best_key(scope: dict[str, set], query: str, sensitivity: float) -> str | No
                 edit_distance = dist
         if similarity < sensitivity_100:
             continue
-        if similarity > best_score or (
-            similarity == best_score and edit_distance < best_distance
-        ):
-            best_key = key
-            best_score = similarity
-            best_distance = edit_distance
-    return best_key
+        alias_ids = alias_map.get(key, ())
+        for i in sorted(ids):
+            score = similarity - (ALIAS_PENALTY if i in alias_ids else 0.0)
+            if score > best_score or (
+                score == best_score and edit_distance < best_distance
+            ):
+                best_id = i
+                best_score = score
+                best_distance = edit_distance
+    return best_id
 
 
 def best_song_match(query: str, sensitivity: float = 0.6) -> int | None:
-    key = _best_key(_playlist_map, query, sensitivity)
-    if key is None:
-        return None
-    return min(_playlist_map[key])
+    return _best_entity(_playlist_map, _playlist_alias_map, query, sensitivity)
 
 
 def best_event_match(query: str, sensitivity: float = 0.6) -> int | None:
-    key = _best_key(_event_map, query, sensitivity)
-    if key is None:
-        return None
-    return min(_event_map[key])
+    return _best_entity(_event_map, _event_alias_map, query, sensitivity)
 
 
 def fuzzy_search(
@@ -425,13 +496,13 @@ def fuzzy_search(
 def fuzzy_search_playlists(
     query: str, sensitivity: float = 0.65, limit: int = 200
 ) -> list[int]:
-    return _fuzzy(_playlist_map, query, sensitivity, limit)
+    return _fuzzy(_playlist_map, query, sensitivity, limit, _playlist_alias_map)
 
 
 def fuzzy_search_events(
     query: str, sensitivity: float = 0.65, limit: int = 50
 ) -> list[int]:
-    return _fuzzy(_event_map, query, sensitivity, limit)
+    return _fuzzy(_event_map, query, sensitivity, limit, _event_alias_map)
 
 
 def get_all_artists() -> list[str]:

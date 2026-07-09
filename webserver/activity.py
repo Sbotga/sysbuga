@@ -326,8 +326,10 @@ async def start_round(
         raise HTTPException(status_code=503, detail="that mode isn't available yet")
 
     round_id = secrets.token_urlsafe(24)
-    expires_at = time.time() + MODE_TIME.get(body.mode, GUESS_TIME)
+    now = time.time()
+    expires_at = now + MODE_TIME.get(body.mode, GUESS_TIME)
     meta = _meta(round_data, user_id, expires_at)
+    meta["started_at"] = now
     await redis_state.save_round(
         round_id, user_id, meta, round_data["image"], round_data["reveal"]
     )
@@ -420,11 +422,15 @@ async def submit_guess(
         await redis_state.finish_round(body.round_id, user_id)
         if user_data:
             await user_data.add_guesses(user_id, meta["mode"], "success")
-        return {
+        resp = {
             "result": "correct",
             "answer": meta["answer_name"],
             "has_reveal": meta["has_reveal"],
         }
+        started = meta.get("started_at")
+        if started is not None:
+            resp["time"] = round(time.time() - started, 2)
+        return resp
     if user_data:
         await user_data.add_guesses(user_id, meta["mode"], "fail")
     return {"result": "incorrect", "matched": matched[1]}

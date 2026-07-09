@@ -1,8 +1,6 @@
 from data.models import Character, Event, Music
 from data.pjsk import PJSKData, character_display_name
 
-INVISIBLE = "\U000e0000"  # tag space some clients (7TV etc.) prepend
-
 DIFFICULTY_ALIASES = {
     "append": "append",
     "master": "master",
@@ -22,13 +20,13 @@ DIFFICULTY_ALIASES = {
 def match_difficulty(arg: str | None) -> str | None:
     if arg is None:
         return None
-    return DIFFICULTY_ALIASES.get(str(arg).lower().strip().strip(INVISIBLE))
+    return DIFFICULTY_ALIASES.get(str(arg).lower().strip())
 
 
 def match_song(pjsk: PJSKData, arg: str | int | None) -> Music | None:
     if arg is None:
         return None
-    q = str(arg).strip(INVISIBLE).strip()
+    q = str(arg).strip()
     if q.isdigit() and q != "39":
         music = pjsk.get_music(int(q))
         if music:
@@ -40,7 +38,7 @@ def match_song(pjsk: PJSKData, arg: str | int | None) -> Music | None:
 def match_event(pjsk: PJSKData, arg: str | int | None) -> Event | None:
     if arg is None:
         return None
-    q = str(arg).strip(INVISIBLE).strip()
+    q = str(arg).strip()
     if q.isdigit():
         event = pjsk.get_event(int(q))
         if event:
@@ -52,7 +50,7 @@ def match_event(pjsk: PJSKData, arg: str | int | None) -> Event | None:
 def match_character(pjsk: PJSKData, arg: str | int | None) -> Character | None:
     if arg is None:
         return None
-    q = str(arg).strip(INVISIBLE).strip().lower().replace(" ", "")
+    q = str(arg).strip().lower().replace(" ", "")
     if not q:
         return None
     if q.isdigit():

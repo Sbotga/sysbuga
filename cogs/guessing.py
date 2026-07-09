@@ -216,7 +216,10 @@ class GuessCog(commands.Cog):
                     embed.set_thumbnail(url="attachment://thumb.png")
                 if flags.get("image"):
                     embed.set_image(url="attachment://image.png")
-                await data["channel"].send(embed=embed, files=files)
+                view = _GuessResultView(self, data)
+                view.message = await data["channel"].send(
+                    embed=embed, files=files, view=view
+                )
             except discord.HTTPException:
                 pass
 
@@ -249,7 +252,9 @@ class GuessCog(commands.Cog):
 
     async def _award(self, message: discord.Message, data: dict) -> discord.Embed:
         self.remove_guess(self.bot, message.channel.id)
-        description = f"Successfully guessed **`{data['answerName']}`**!"
+        started = data.get("startTime")
+        timing = f" in `{time.time() - started:.2f}` seconds" if started else ""
+        description = f"Successfully guessed **`{data['answerName']}`**{timing}!"
         if data["data"].get("notes"):
             description += (
                 f"\n\n### This song has `{data['data']['notes']}` notes on Master."
@@ -262,7 +267,8 @@ class GuessCog(commands.Cog):
             embed.set_thumbnail(url="attachment://thumb.png")
         if flags.get("image"):
             embed.set_image(url="attachment://image.png")
-        await message.reply(embed=embed, files=files)
+        view = _GuessResultView(self, data)
+        view.message = await message.reply(embed=embed, files=files, view=view)
         if data["guessing"]:
             await self.bot.user_data.add_guesses(message.author.id, data["guessing"], "success")  # type: ignore[union-attr]
         return embed
@@ -387,6 +393,7 @@ class GuessCog(commands.Cog):
         self, interaction: discord.Interaction, mode: str, guess: dict
     ):
         settings = await self.bot.user_data.get_settings(interaction.user.id)  # type: ignore[union-attr]
+        secs = MODE_TIME.get(mode, GUESS_TIME)
 
         if mode in (
             "jacket",
@@ -419,7 +426,7 @@ class GuessCog(commands.Cog):
                     title="Guess The Song", color=discord.Color.dark_gold()
                 )
                 embed.description = (
-                    f"Guess the song from its Master note count.\nUse `{GUESS_PREFIX}your guess` to guess. You have 60 seconds.\n\n"
+                    f"Guess the song from its Master note count.\nUse `{GUESS_PREFIX}your guess` to guess. You have {secs} seconds.\n\n"
                     f"# This song has `{master.total_note_count}` notes on Master."
                 )
                 return embed, None
@@ -442,7 +449,7 @@ class GuessCog(commands.Cog):
                 )
                 embed.set_image(url="attachment://image.png")
                 embed.description = (
-                    f"Guess the song from a cropped {diff} chart.\nUse `{GUESS_PREFIX}your guess` to guess."
+                    f"Guess the song from a cropped {diff} chart.\nUse `{GUESS_PREFIX}your guess` to guess. You have {secs} seconds."
                     + ("\n\n**Chart is mirrored! (your setting)**" if mirror else "")
                 )
                 return embed, discord.File(cropped, "image.png")
@@ -476,7 +483,7 @@ class GuessCog(commands.Cog):
                 title="Guess The Song", color=discord.Color.dark_gold()
             )
             embed.set_image(url="attachment://image.png")
-            embed.description = f"{label}\nUse `{GUESS_PREFIX}your guess` to guess. You have 60 seconds."
+            embed.description = f"{label}\nUse `{GUESS_PREFIX}your guess` to guess. You have {secs} seconds."
             return embed, discord.File(cropped, "image.png")
 
         if mode in ("character", "character_bw"):
@@ -500,6 +507,8 @@ class GuessCog(commands.Cog):
             guess["answerName"] = character_display_name(char)
             guess["answer_file_path"] = io.BytesIO(art)
             guess["data"]["card_name"] = self.bot.pjsk.card_display_name(card, use_emojis=True)  # type: ignore[union-attr]
+            guess["data"]["card_id"] = card.id
+            guess["data"]["trained"] = trained
             cropped = await unblock.to_process_with_timeout(
                 _crop_square, art, 250, mode == "character_bw"
             )
@@ -507,7 +516,7 @@ class GuessCog(commands.Cog):
                 title="Guess The Character", color=discord.Color.dark_gold()
             )
             embed.set_image(url="attachment://image.png")
-            embed.description = f"Guess the character from a cropped card.\nUse `{GUESS_PREFIX}your guess` to guess. You have 30 seconds."
+            embed.description = f"Guess the character from a cropped card.\nUse `{GUESS_PREFIX}your guess` to guess. You have {secs} seconds."
             return embed, discord.File(cropped, "image.png")
 
         if mode == "event":
@@ -529,7 +538,7 @@ class GuessCog(commands.Cog):
                 title="Guess The Event", color=discord.Color.dark_gold()
             )
             embed.set_image(url="attachment://image.png")
-            embed.description = f"Guess the event from a cropped background.\nUse `{GUESS_PREFIX}your guess` to guess. You have 60 seconds."
+            embed.description = f"Guess the event from a cropped background.\nUse `{GUESS_PREFIX}your guess` to guess. You have {secs} seconds."
             return embed, discord.File(cropped, "image.png")
 
         return None, None
@@ -619,9 +628,13 @@ class GuessCog(commands.Cog):
             color=discord.Color.red(),
         )
         files, flags = await self._reveal_files(data)
+        if flags.get("thumb"):
+            embed.set_thumbnail(url="attachment://thumb.png")
         if flags.get("image"):
             embed.set_image(url="attachment://image.png")
-        await interaction.followup.send(embed=embed, files=files)
+        view = _GuessResultView(self, data)
+        await interaction.followup.send(embed=embed, files=files, view=view)
+        view.message = await interaction.original_response()
 
     @guess.command(name="hint", description="Get a hint for the active guess.")
     async def hint(self, interaction: discord.Interaction) -> None:
@@ -720,6 +733,79 @@ class GuessCog(commands.Cog):
         )
         await interaction.followup.send(embed=render_rows(page_rows, 1), view=view)
         view.message = await interaction.original_response()
+
+
+class _GuessResultView(SbugaView):
+    """Buttons on a finished guess: Play Again, plus type-specific info buttons
+    (song -> Song Info/Song Aliases, character -> View Card/Character Info).
+    Each info button just reuses the existing slash command's callback."""
+
+    def __init__(self, cog: "GuessCog", data: dict) -> None:
+        super().__init__(timeout=15)  # matches the original bot's button timeout
+        self.cog = cog
+        self.data = data
+        if data["guessType"] == "song":
+            self._add("Song Info", self._song_info)
+            self._add("Song Aliases", self._song_aliases)
+        elif data["guessType"] == "character":
+            if data["data"].get("card_id"):
+                self._add("View Card", self._view_card)
+            self._add("Character Info", self._character_info)
+
+    def _add(self, label: str, handler) -> None:
+        button = discord.ui.Button(label=label, style=discord.ButtonStyle.gray)
+
+        async def callback(interaction: discord.Interaction, _b=button) -> None:
+            await self._spend(interaction, _b)
+            await handler(interaction)
+
+        button.callback = callback
+        self.add_item(button)
+
+    async def _spend(self, interaction: discord.Interaction, item) -> None:
+        """Disable the clicked button via a plain message edit, leaving the
+        interaction unresponded so the command callback can defer normally."""
+        item.disabled = True
+        try:
+            if interaction.message:
+                await interaction.message.edit(view=self)
+        except discord.HTTPException:
+            pass
+
+    async def _invoke(
+        self, interaction: discord.Interaction, cog_name: str, command: str, arg: str
+    ) -> None:
+        cog = self.cog.bot.get_cog(cog_name)
+        if cog is None:
+            await interaction.response.send_message(
+                embed=embeds.error_embed("That isn't available right now."),
+                ephemeral=True,
+            )
+            return
+        await getattr(cog, command).callback(cog, interaction, arg)
+
+    @discord.ui.button(label="Play Again", style=discord.ButtonStyle.primary)
+    async def play_again(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await self._spend(interaction, button)
+        await self.cog.handle_guess(interaction, self.data["guessing"])
+
+    async def _song_info(self, interaction: discord.Interaction) -> None:
+        await self._invoke(interaction, "SongInfo", "info", str(self.data["answer"]))
+
+    async def _song_aliases(self, interaction: discord.Interaction) -> None:
+        await self._invoke(interaction, "SongInfo", "aliases", str(self.data["answer"]))
+
+    async def _character_info(self, interaction: discord.Interaction) -> None:
+        await self._invoke(
+            interaction, "CharactersCog", "info", str(self.data["answer"])
+        )
+
+    async def _view_card(self, interaction: discord.Interaction) -> None:
+        await self._invoke(
+            interaction, "CharactersCog", "card", str(self.data["data"]["card_id"])
+        )
 
 
 class _LeaderboardView(SbugaView):

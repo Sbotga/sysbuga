@@ -359,7 +359,11 @@ async function submitGuess(event) {
     // show what they typed, and what it resolved to when that differs (an alias)
     const text = guess === result.answer ? guess : `${guess} → ${result.answer}`;
     playerLog("✅", text, "right");
-    showReveal({ ...currentRound, ...result }, `Correct! It was ${result.answer}.`, "good");
+    const msg =
+      result.time != null
+        ? `Correct in ${result.time.toFixed(2)}s! It was ${result.answer}.`
+        : `Correct! It was ${result.answer}.`;
+    showReveal({ ...currentRound, ...result }, msg, "good");
   } else if (result.result === "expired") {
     showReveal({ ...currentRound, ...result }, `Time's up! It was ${result.answer}.`, "bad");
   } else if (result.result === "incorrect") {

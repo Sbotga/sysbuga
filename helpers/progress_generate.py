@@ -66,12 +66,12 @@ def generate_general_progress(data: list[StrDifficultyCategory]) -> BytesIO:
     ICON_PADDING = 20
 
     difficulty_colors = {
-        "append": f"{EMOJI_ASSETS}/append_color.jpg",
-        "hard": f"{EMOJI_ASSETS}/hard_color.jpg",
-        "normal": f"{EMOJI_ASSETS}/normal_color.jpg",
-        "easy": f"{EMOJI_ASSETS}/easy_color.jpg",
-        "master": f"{EMOJI_ASSETS}/master_color.jpg",
-        "expert": f"{EMOJI_ASSETS}/expert_color.jpg",
+        "append": f"{EMOJI_ASSETS}/append_color.png",
+        "hard": f"{EMOJI_ASSETS}/hard_color.png",
+        "normal": f"{EMOJI_ASSETS}/normal_color.png",
+        "easy": f"{EMOJI_ASSETS}/easy_color.png",
+        "master": f"{EMOJI_ASSETS}/master_color.png",
+        "expert": f"{EMOJI_ASSETS}/expert_color.png",
     }
     difficulty_images = {
         key: Image.open(path)
