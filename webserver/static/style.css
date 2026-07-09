@@ -229,6 +229,8 @@ select:disabled, input:disabled, button:disabled { opacity: 0.5; cursor: not-all
   border-radius: 10px; background: var(--surface); color: var(--text); text-align: left; font-weight: 600;
 }
 .spectate-item:hover { background: var(--surface-2); }
+.spectate-item.idle { opacity: 0.7; }
+.spectate-item.idle:hover { opacity: 1; }
 .spectate-item img { width: 34px; height: 34px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
 .spectate-item .who { flex: 1; min-width: 0; }
 .spectate-item .who .name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

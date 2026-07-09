@@ -235,6 +235,12 @@ async def handle(inst: str, member: LocalMember, msg: dict[str, Any]) -> None:
     op = msg.get("op")
     uid = member.user_id
 
+    if op == "ping":
+        # reply so there's server->client traffic; proxies (nginx/Cloudflare) drop a
+        # websocket that's silent from the upstream side even if the client is pinging
+        member.send({"op": "pong"})
+        return
+
     if op == "typing":
         text = str(msg.get("text") or "")[:_TEXT_CAP]
         state = await _get_state(inst, uid)

@@ -30,7 +30,11 @@ let spectateTarget = null; // id we're currently watching, or null
 let spectateTimerHandle = null;
 let hubClosing = false;
 let heartbeatHandle = null;
-let lastRoundPayload = null; // last round we broadcast, replayed after a reconnect
+// what we're currently broadcasting, replayed verbatim after a reconnect so a
+// dropped socket doesn't reset us to "not playing" or lose our spectators
+let lastRoundPayload = null; // the active/last round, or null when not in a round
+let myGuessLog = []; // our own log entries for this round
+let myResult = null; // reveal result once the round ends, else null
 
 const $ = (id) => document.getElementById(id);
 
@@ -243,8 +247,10 @@ function appendLog(logEl, icon, text, cls) {
 
 // player's own guess log entry — mirror it to anyone spectating us
 function playerLog(icon, text, cls) {
+  const entry = { marker: icon, text, cls };
   appendLog($("guess-log"), icon, text, cls);
-  hubSend({ op: "log", entry: { marker: icon, text, cls } });
+  myGuessLog.push(entry);
+  hubSend({ op: "log", entry });
 }
 
 async function startRound(mode) {
@@ -275,6 +281,8 @@ async function startRound(mode) {
     $("guess-form").hidden = true;
     $("btn-again").hidden = false;
     lastRoundPayload = null;
+    myGuessLog = [];
+    myResult = null;
     hubSend({ op: "clear" });
     return;
   }
@@ -299,6 +307,8 @@ async function startRound(mode) {
     has_reveal: round.has_reveal,
     expires_at: round.expires_at,
   };
+  myGuessLog = [];
+  myResult = null;
   hubSend({ op: "round", round: lastRoundPayload });
 }
 
@@ -317,15 +327,13 @@ function showReveal(round, message, cls) {
     img.src = `${API}/api/activity/guess/round/${round.round_id}/reveal`;
     img.hidden = false;
   }
-  hubSend({
-    op: "result",
-    result: {
-      text: message,
-      cls: cls || "",
-      round_id: round.round_id,
-      has_reveal: !!round.has_reveal,
-    },
-  });
+  myResult = {
+    text: message,
+    cls: cls || "",
+    round_id: round.round_id,
+    has_reveal: !!round.has_reveal,
+  };
+  hubSend({ op: "result", result: myResult });
 }
 
 async function submitGuess(event) {
@@ -417,6 +425,11 @@ function hubSend(obj) {
 
 function connectHub() {
   if (!accessToken || !instanceId) return; // need auth + a room to join
+  if (
+    hubWs &&
+    (hubWs.readyState === WebSocket.CONNECTING || hubWs.readyState === WebSocket.OPEN)
+  )
+    return; // don't stack sockets
   try {
     hubWs = new WebSocket(hubUrl());
   } catch {
@@ -430,10 +443,15 @@ function connectHub() {
       name: selfName,
       avatar: selfAvatar,
     });
-    // re-sync state after a reconnect: rejoin resets our server-side state, so
-    // replay what we're doing (watching someone / mid-round) to reattach spectators
+    // a reconnect re-runs join() server-side, which resets us to empty/not-playing,
+    // so replay exactly what we're doing: watching someone, and/or our current round
+    // (incl. the play-again screen, where lastRoundPayload is set but currentRound isn't)
     if (spectateTarget) hubSend({ op: "watch", target: spectateTarget });
-    if (currentRound && lastRoundPayload) hubSend({ op: "round", round: lastRoundPayload });
+    if (lastRoundPayload) {
+      hubSend({ op: "round", round: lastRoundPayload });
+      for (const entry of myGuessLog) hubSend({ op: "log", entry });
+      if (myResult) hubSend({ op: "result", result: myResult });
+    }
     startHeartbeat();
   });
   hubWs.addEventListener("message", (e) => {
@@ -445,9 +463,10 @@ function connectHub() {
     }
     onHubMessage(msg);
   });
-  hubWs.addEventListener("close", () => {
+  hubWs.addEventListener("close", (e) => {
     hubWs = null;
     stopHeartbeat();
+    console.log("[hub] ws closed", e.code, e.reason || "");
     if (!hubClosing) setTimeout(connectHub, 2000); // reconnect
   });
   hubWs.addEventListener("error", () => {});
@@ -583,18 +602,18 @@ function renderSpectateList() {
   for (const m of others) {
     const li = document.createElement("li");
     const btn = document.createElement("button");
-    btn.className = "spectate-item";
-    btn.disabled = !m.active;
+    btn.className = m.active ? "spectate-item" : "spectate-item idle";
+    // clickable even when idle — you'll watch them and auto-switch to their round
+    // the moment they start playing
     btn.innerHTML =
       `<img alt="" /><span class="who"><span class="name"></span><span class="mode"></span></span>`;
     btn.querySelector("img").src = `${API}${m.avatar}`;
     btn.querySelector(".name").textContent = m.name;
     btn.querySelector(".mode").textContent = m.active ? "Playing now" : "Not playing";
-    if (m.active)
-      btn.addEventListener("click", () => {
-        closeSpectatePicker();
-        startSpectating(m.id, m.name);
-      });
+    btn.addEventListener("click", () => {
+      closeSpectatePicker();
+      startSpectating(m.id, m.name);
+    });
     li.appendChild(btn);
     list.appendChild(li);
   }
@@ -741,6 +760,8 @@ $("btn-giveup").addEventListener("click", giveUp);
 $("btn-quit").addEventListener("click", async () => {
   if (!currentRound) {
     lastRoundPayload = null;
+    myGuessLog = [];
+    myResult = null;
     hubSend({ op: "clear" }); // already revealed — stop broadcasting the finished round
     return show("setup");
   }
@@ -748,6 +769,8 @@ $("btn-quit").addEventListener("click", async () => {
     stopTimer();
     currentRound = null;
     lastRoundPayload = null;
+    myGuessLog = [];
+    myResult = null;
     hubSend({ op: "clear" });
     show("setup");
   }
