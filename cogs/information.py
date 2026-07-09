@@ -379,6 +379,7 @@ class InfoCog(commands.Cog):
         except SbugaError as e:
             await interaction.followup.send(embed=self._alias_error_embed(e, target))
             return
+        await self.bot.pjsk.refresh_aliases()  # type: ignore[union-attr]
         await interaction.followup.send(
             embed=embeds.success_embed(
                 f"Added alias for `{music.title}` (ID `{music.id}`)\nAlias: `{target}`",
@@ -422,6 +423,7 @@ class InfoCog(commands.Cog):
                 )
             )
             return
+        await self.bot.pjsk.refresh_aliases()  # type: ignore[union-attr]
         await interaction.followup.send(
             embed=embeds.success_embed(
                 f"Removed alias for `{music.title}` (ID `{music.id}`)\nAlias: `{target}`",

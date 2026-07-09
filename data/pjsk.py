@@ -12,6 +12,8 @@ MUSIC_CACHE_FILE = "cache/music_data.json"
 EVENT_CACHE_FILE = "cache/event_data.json"
 EXTRA_CACHE_FILE = "cache/extra_data.json"
 
+ALIAS_REFRESH_INTERVAL = 120
+
 RARITY_DISPLAY = {
     "rarity_1": "1☆",
     "rarity_2": "2☆",
@@ -50,8 +52,13 @@ class PJSKData:
         self._cards: list[Card] = []
         self._gacha_cache: dict[str, list[Gacha]] = {}
         self._versions: dict[str, str] = {}
+        # last known aliases, kept so a failed fetch doesn't silently drop them from
+        # the freshly-fetched Music/Event objects (which arrive without any)
+        self._song_aliases: dict[int, list[str]] = {}
+        self._event_aliases: dict[int, list[str]] = {}
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
+        self._alias_task: asyncio.Task | None = None
 
     # tw/kr assets are not extracted/uploaded (subset of jp, same bundle
     # names) — point their asset URLs at the jp tree instead.
@@ -330,8 +337,10 @@ class PJSKData:
             self._music_cache = new_music
             self._versions = {r: versions[r] for r in self.regions}
 
+            await self._fetch_song_aliases()
+            self._apply_song_aliases()
             merged = list(self._merged_music().values())
-            search.build_search_maps(merged, new_music, versions=self._versions)
+            await search.build_search_maps(merged, new_music, versions=self._versions)
             self._save_music()
 
             await self._refresh_events()
@@ -361,21 +370,72 @@ class PJSKData:
                 "dormant (see MISSING_SBUGA_ROUTES.md #1)"
             )
         self._event_cache = new_events
-        await self._apply_event_aliases()
-        search.build_event_search_map(self._all_region_events())
+        await self._fetch_event_aliases()
+        self._apply_event_aliases()
+        await search.build_event_search_map(self._all_region_events())
         self._save_events()
 
-    async def _apply_event_aliases(self) -> None:
+    async def _fetch_song_aliases(self) -> bool:
+        """Refresh the cached song aliases. True if they changed."""
+        try:
+            aliases = await self.client.get_song_aliases()
+        except Exception:
+            return False
+        by_music: dict[int, list[str]] = {}
+        for a in aliases:
+            by_music.setdefault(a.music_id, []).append(a.alias)
+        for values in by_music.values():
+            values.sort()
+        if by_music == self._song_aliases:
+            return False
+        self._song_aliases = by_music
+        return True
+
+    async def _fetch_event_aliases(self) -> bool:
         try:
             aliases = await self.client.get_event_aliases()
         except Exception:
-            return
+            return False
         by_event: dict[int, list[str]] = {}
         for a in aliases:
             by_event.setdefault(a.event_id, []).append(a.alias)
+        for values in by_event.values():
+            values.sort()
+        if by_event == self._event_aliases:
+            return False
+        self._event_aliases = by_event
+        return True
+
+    def _apply_song_aliases(self) -> None:
+        for musics in self._music_cache.values():
+            for m in musics:
+                m.manual_aliases = self._song_aliases.get(m.id, [])
+
+    def _apply_event_aliases(self) -> None:
         for events in self._event_cache.values():
             for e in events:
-                e.name_variants = by_event.get(e.id, [])
+                e.name_variants = self._event_aliases.get(e.id, [])
+
+    async def refresh_aliases(self, force: bool = False) -> bool:
+        """Pull the alias lists and rebuild the affected search maps if they moved.
+        Cheap when nothing changed: two API calls and no map rebuild."""
+        songs_changed = await self._fetch_song_aliases()
+        events_changed = await self._fetch_event_aliases()
+        if not (force or songs_changed or events_changed):
+            return False
+        async with self._lock:
+            if (force or songs_changed) and self._music_cache:
+                self._apply_song_aliases()
+                merged = list(self._merged_music().values())
+                await search.build_search_maps(
+                    merged, self._music_cache, versions=self._versions
+                )
+                self._save_music()
+            if (force or events_changed) and self._event_cache:
+                self._apply_event_aliases()
+                await search.build_event_search_map(self._all_region_events())
+                self._save_events()
+        return True
 
     async def _refresh_extras(self) -> None:
         chars: dict[int, Character] = {}
@@ -424,18 +484,48 @@ class PJSKData:
             except Exception as e:
                 print(f"[PJSKData] refresh error: {e}")
 
+    async def _poll_aliases(self) -> None:
+        # aliases change independently of the game data version, so they get their own
+        # (much shorter) loop; it also lets the activity workers pick up an alias a
+        # moderator added through the bot in another process
+        while True:
+            await asyncio.sleep(ALIAS_REFRESH_INTERVAL)
+            try:
+                if await self.refresh_aliases():
+                    print("[PJSKData] aliases changed, search maps rebuilt")
+            except Exception as e:
+                print(f"[PJSKData] alias refresh error: {e}")
+
+    def _seed_alias_cache(self) -> None:
+        """Recover the alias maps from the on-disk data so the first poll doesn't
+        rebuild just because the in-memory cache started out empty."""
+        for musics in self._music_cache.values():
+            for m in musics:
+                if m.manual_aliases:
+                    self._song_aliases[m.id] = sorted(m.manual_aliases)
+        for events in self._event_cache.values():
+            for e in events:
+                if e.name_variants:
+                    self._event_aliases[e.id] = sorted(e.name_variants)
+
     async def start(self) -> None:
         self._load_from_disk()
+        self._seed_alias_cache()
         if self._music_cache:
             merged = list(self._merged_music().values())
-            search.build_search_maps(merged, self._music_cache, versions=self._versions)
-            search.build_event_search_map(self._all_region_events())
+            await search.build_search_maps(
+                merged, self._music_cache, versions=self._versions
+            )
+            await search.build_event_search_map(self._all_region_events())
         try:
             await self.refresh()
         except SbugaError as e:
             print(f"[PJSKData] initial refresh failed: {e}")
         self._task = asyncio.create_task(self._poll())
+        self._alias_task = asyncio.create_task(self._poll_aliases())
 
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()
+        if self._alias_task:
+            self._alias_task.cancel()

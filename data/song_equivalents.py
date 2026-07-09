@@ -27,3 +27,13 @@ def songs_equivalent(a: int, b: int) -> bool:
     return (
         a == b or b in SONG_EQUIVALENTS.get(a, ()) or a in SONG_EQUIVALENTS.get(b, ())
     )
+
+
+def equivalents_of(song_id: int) -> set[int]:
+    """
+    every other song id equivalent to this one, in either direction
+    """
+    linked = set(SONG_EQUIVALENTS.get(song_id, ()))
+    linked.update(k for k, v in SONG_EQUIVALENTS.items() if song_id in v)
+    linked.discard(song_id)
+    return linked

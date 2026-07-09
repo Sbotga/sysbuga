@@ -13,10 +13,11 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from data.pjsk import character_display_name
-from data.song_equivalents import songs_equivalent
+from data.song_equivalents import equivalents_of, songs_equivalent
 from database.queries import GUESS_LEADERBOARD_PER_PAGE
 from helpers import converters, embeds, tools, unblock
 from helpers.autocompletes import autocompletes
+from helpers.emojis import emojis
 from helpers.views import SbugaView
 
 if TYPE_CHECKING:
@@ -130,7 +131,9 @@ class GuessCog(commands.Cog):
         except discord.HTTPException:
             return False
 
-    async def channel_checks(self, interaction: discord.Interaction) -> bool:
+    async def channel_checks(
+        self, interaction: discord.Interaction, already_guessing_check: bool = True
+    ) -> bool:
         if not interaction.channel:
             await interaction.followup.send(
                 embed=embeds.error_embed("I couldn't get this channel.")
@@ -197,7 +200,10 @@ class GuessCog(commands.Cog):
                 )
             )
             return False
-        if interaction.channel.id in self.bot.cache.guess_channels:
+        if (
+            already_guessing_check
+            and interaction.channel.id in self.bot.cache.guess_channels
+        ):
             await interaction.followup.send(
                 embed=embeds.error_embed("A guessing game is already happening here!")
             )
@@ -533,16 +539,16 @@ class GuessCog(commands.Cog):
             trained = card.card_rarity_type != "rarity_birthday" and bool(
                 random.randint(0, 1)
             )
-            url = (
-                card.card_url_trained if trained else card.card_url_normal
-            ) or card.card_url_normal
+            if trained and not card.card_url_trained:
+                trained = False  # no trained art; don't claim it in the reveal or hint
+            url = card.card_url_trained if trained else card.card_url_normal
             art = await _fetch_bytes(url) if url else None
             if not art:
                 return None, None
             guess["answer"] = char.id
             guess["answerName"] = character_display_name(char)
             guess["answer_file_path"] = io.BytesIO(art)
-            guess["data"]["card_name"] = self.bot.pjsk.card_display_name(card, use_emojis=True)  # type: ignore[union-attr]
+            guess["data"]["card_name"] = self.bot.pjsk.card_display_name(card, use_emojis=True, trained=trained)  # type: ignore[union-attr]
             guess["data"]["card_id"] = card.id
             guess["data"]["trained"] = trained
             cropped = await unblock.to_process_with_timeout(
@@ -672,22 +678,89 @@ class GuessCog(commands.Cog):
         await interaction.followup.send(embed=embed, files=files, view=view)
         view.message = await interaction.original_response()
 
+    def _master_level(self, song_id: int) -> int | None:
+        # append-only entries (388) carry no master chart, so fall back to the
+        # song they're a copy of
+        for candidate in (song_id, *sorted(equivalents_of(song_id))):
+            music = self.bot.pjsk.get_music(candidate)  # type: ignore[union-attr]
+            if not music:
+                continue
+            master = next(
+                (d for d in music.difficulties if d.difficulty == "master"), None
+            )
+            if master:
+                return master.play_level
+        return None
+
     @guess.command(name="hint", description="Get a hint for the active guess.")
     async def hint(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(thinking=True)
+        if not await self.channel_checks(interaction, already_guessing_check=False):
+            return
         data = self.bot.cache.guess_channels.get(interaction.channel.id)  # type: ignore[union-attr]
         if not data:
             await interaction.followup.send(
                 embed=embeds.error_embed("There's no active guess here.")
             )
             return
-        name = str(data["answerName"])
-        hint = name[0] + "".join("_" if c != " " else " " for c in name[1:])
+
+        files: list[discord.File] = []
+        if data["guessType"] == "song":
+            level = self._master_level(data["answer"])
+            if level is None:
+                await interaction.followup.send(
+                    embed=embeds.error_embed(
+                        "I couldn't work out a hint for this song."
+                    )
+                )
+                return
+            embed = embeds.embed(
+                title="Guess Hint",
+                description=(
+                    f"The song is level **`{level}`** (after any rerates) on "
+                    f"{emojis.difficulty_colors['master']} **Master**."
+                ),
+                color=discord.Color.red(),
+            )
+        elif data["guessType"] == "character":
+            trained = "trained" if data["data"]["trained"] else "not trained"
+            embed = embeds.embed(
+                title="Guess Hint",
+                description=f"The character card is **`{trained}`**.",
+                color=discord.Color.red(),
+            )
+        elif data["guessType"] == "event":
+            event = self.bot.pjsk.get_event(data["answer"])  # type: ignore[union-attr]
+            art = (
+                await _fetch_bytes(event.character_url)
+                if event and event.character_url
+                else None
+            )
+            if not art:
+                await interaction.followup.send(
+                    embed=embeds.error_embed("I couldn't load a hint for this event.")
+                )
+                return
+            embed = embeds.embed(
+                title="Guess Hint",
+                description="Here is a character featured in this event.",
+                color=discord.Color.red(),
+            )
+            embed.set_image(url="attachment://image.png")
+            files.append(discord.File(io.BytesIO(art), "image.png"))
+        else:
+            await interaction.followup.send(
+                embed=embeds.embed(
+                    title="Unsupported Hint",
+                    description="Ongoing guess does not support hints.",
+                    color=discord.Color.red(),
+                )
+            )
+            return
+
+        await interaction.followup.send(embed=embed, files=files)
         if data["guessing"]:
             await self.bot.user_data.add_guesses(interaction.user.id, data["guessing"], "hint")  # type: ignore[union-attr]
-        await interaction.followup.send(
-            embed=embeds.embed(f"**Hint:** `{hint}` ({len(name)} characters)")
-        )
 
     @guess.command(
         name="toggle", description="Enable or disable guessing in this server."

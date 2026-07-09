@@ -61,6 +61,9 @@ class Music(BaseModel):
     title: str
     pronunciation: str | None = None
     title_variants: list[str] = []
+    # the subset of title_variants a human actually added; the backend folds its own
+    # generated keys into title_variants, so the two tiers can't be told apart there
+    manual_aliases: list[str] = []
     lyricist: str | None = None
     composer: str | None = None
     arranger: str | None = None
