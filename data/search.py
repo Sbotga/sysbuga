@@ -10,21 +10,27 @@ from rapidfuzz.distance import Levenshtein
 
 from data.models import Event, Music, _build_char_name
 
-_katsu_hepburn = cutlet.Cutlet(
-    system="hepburn", use_foreign_spelling=False, ensure_ascii=False
-)
-_katsu_nihon = cutlet.Cutlet(
-    system="nihon", use_foreign_spelling=False, ensure_ascii=False
-)
-_katsu_kunrei = cutlet.Cutlet(
-    system="kunrei", use_foreign_spelling=False, ensure_ascii=False
-)
+_ROMAJI_SYSTEMS = ("hepburn", "nihon", "kunrei")
 
-ROMANIZERS = [
-    lambda text: _katsu_hepburn.romaji(text).lower().strip(),
-    lambda text: _katsu_nihon.romaji(text).lower().strip(),
-    lambda text: _katsu_kunrei.romaji(text).lower().strip(),
+# Each system is run twice. `use_foreign_spelling` maps katakana loanwords back to
+# their source spelling — アクセラレイト -> "accelerate", which is how people type it —
+# but it guesses wrong on names (ロキ -> "loci"). Neither setting is a superset, so
+# both are kept: every title gets a phonetic key *and* a loanword key.
+_KATSU = [
+    cutlet.Cutlet(system=system, use_foreign_spelling=foreign, ensure_ascii=False)
+    for system in _ROMAJI_SYSTEMS
+    for foreign in (False, True)
 ]
+
+
+def _make_romanizer(katsu: "cutlet.Cutlet"):
+    def romanize(text: str) -> str:
+        return katsu.romaji(text).lower().strip()
+
+    return romanize
+
+
+ROMANIZERS = [_make_romanizer(k) for k in _KATSU]
 
 _KANA_RE = re.compile(r"[぀-ヿㇰ-ㇿ]")
 _CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
@@ -49,7 +55,7 @@ def _strip_diacritics(text: str) -> str:
 
 
 CACHE_FILE = "cache/search_maps.json"
-CACHE_VERSION = 2  # bump when the cache shape changes (e.g. added alias maps)
+CACHE_VERSION = 3  # bump when the cache shape OR the generated keys change
 
 
 def _is_invisible(ch: str) -> bool:
@@ -132,7 +138,10 @@ _event_map: dict[str, set[int]] = {}
 # e.g. "aria" resolves to the song *titled* アリア over one merely aliased "aria".
 _playlist_alias_map: dict[str, set[int]] = {}
 _event_alias_map: dict[str, set[int]] = {}
-ALIAS_PENALTY = 3.0  # slight; only flips near-ties toward the real title
+# Just enough to break an exact tie in favour of the real title (e.g. "aria" is the
+# title of one song and an alias of another). Too large and a strong alias match
+# would lose to a weaker title match.
+ALIAS_PENALTY = 1.0
 _all_artists: list[str] = []
 _all_captions: list[str] = []
 _min_level: int = 1
@@ -279,19 +288,21 @@ def build_search_maps(
         _add_keys([str(music.id)], all_level_keys)
         _add_playlist_keys([str(music.id)], mid_list)
 
+        # People (artist/lyricist/composer/arranger) only go in the *search* map.
+        # The playlist map resolves a name to one song, and a person's name is not a
+        # song name — "accelerate" used to resolve to Wonder Style purely because its
+        # composer is "colate".
         if music.artist:
             artist_keys = [music.artist.name, *_romanize(music.artist.name)]
             if music.artist.pronunciation:
                 artist_keys.append(music.artist.pronunciation)
                 artist_keys.extend(_romanize(music.artist.pronunciation))
             _add_keys(artist_keys, all_level_keys)
-            _add_playlist_keys(artist_keys, mid_list)
 
         for field in [music.lyricist, music.composer, music.arranger]:
             if field:
                 field_keys = [field, *_romanize(field)]
                 _add_keys(field_keys, all_level_keys)
-                _add_playlist_keys(field_keys, mid_list)
 
         for vocal in music.vocals:
             vocal_level_keys = [
@@ -441,18 +452,19 @@ def _best_entity(
     alias_map: dict[str, set[int]],
     query: str,
     sensitivity: float,
-) -> int | None:
-    """Single best id: token_set_ratio with an edit-distance penalty, plus a slight
-    penalty when the matched key is only an *alias* for that id — so the song/event
-    the key is the real title of wins a tie over one merely aliased to it. Ties are
-    otherwise broken by edit distance, then lowest id (matching the old min())."""
+) -> tuple[int, str] | None:
+    """Single best (id, matched key): token_set_ratio with an edit-distance penalty,
+    plus a slight penalty when the matched key is only an *alias* for that id — so the
+    song/event the key is the real title of wins a tie over one merely aliased to it.
+    Ties are otherwise broken by edit distance, then lowest id."""
     if not scope or not query.strip():
         return None
+    query_pp = preprocess(query)
     variants = _query_variants(query)
     sensitivity_100 = sensitivity * 100
     best_id: int | None = None
-    best_score = -1.0
-    best_distance = 10**9
+    best_key: str = ""
+    best: tuple[float, bool, int] | None = None
 
     for key, ids in scope.items():
         similarity: float = -1.0
@@ -467,24 +479,34 @@ def _best_entity(
                 edit_distance = dist
         if similarity < sensitivity_100:
             continue
+        # Several keys can tie at 100/0 (a title, its romanisation, its loanword
+        # spelling). Prefer the one the user actually typed, so the reported key is
+        # meaningful — otherwise "ロキ" could report having matched "loci".
+        exact = key == query_pp
         alias_ids = alias_map.get(key, ())
         for i in sorted(ids):
             score = similarity - (ALIAS_PENALTY if i in alias_ids else 0.0)
-            if score > best_score or (
-                score == best_score and edit_distance < best_distance
-            ):
+            candidate = (score, exact, -edit_distance)
+            if best is None or candidate > best:
+                best = candidate
                 best_id = i
-                best_score = score
-                best_distance = edit_distance
-    return best_id
+                best_key = key
+    return None if best_id is None else (best_id, best_key)
 
 
-def best_song_match(query: str, sensitivity: float = 0.6) -> int | None:
+def best_song_match_key(query: str, sensitivity: float = 0.6) -> tuple[int, str] | None:
+    """The matched song id along with the key (title or alias) that matched it."""
     return _best_entity(_playlist_map, _playlist_alias_map, query, sensitivity)
 
 
+def best_song_match(query: str, sensitivity: float = 0.6) -> int | None:
+    hit = best_song_match_key(query, sensitivity)
+    return hit[0] if hit else None
+
+
 def best_event_match(query: str, sensitivity: float = 0.6) -> int | None:
-    return _best_entity(_event_map, _event_alias_map, query, sensitivity)
+    hit = _best_entity(_event_map, _event_alias_map, query, sensitivity)
+    return hit[0] if hit else None
 
 
 def fuzzy_search(

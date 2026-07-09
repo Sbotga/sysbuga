@@ -367,8 +367,12 @@ async function submitGuess(event) {
   } else if (result.result === "expired") {
     showReveal({ ...currentRound, ...result }, `Time's up! It was ${result.answer}.`, "bad");
   } else if (result.result === "incorrect") {
-    // their actual guess plus the fuzzy match it landed on
-    playerLog("❌", `${guess} → ${result.matched}`, "wrong");
+    // their guess, the song it landed on, and the alias that matched (when the
+    // alias isn't just the song's own name)
+    const landed = result.matched_key
+      ? `${result.matched} (${result.matched_key})`
+      : result.matched;
+    playerLog("❌", `${guess} → ${landed}`, "wrong");
     $("guess-input").value = "";
     hubSend({ op: "typing", text: "" });
     $("guess-input").focus();

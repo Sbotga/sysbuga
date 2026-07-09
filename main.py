@@ -95,6 +95,13 @@ class SbugaBot(commands.Bot):
     async def on_ready(self) -> None:
         assert self.user is not None
         self.print(f"Discord | Logged in as {self.user} ({self.user.id})")
+        # command mentions need the synced ids; without this they only exist after
+        # someone runs the `sync` dev command in this process
+        if not self.app_commands:
+            try:
+                self.app_commands = list(await self.tree.fetch_commands())
+            except discord.HTTPException as e:
+                self.warn(f"Couldn't fetch app commands: {e}")
 
     async def close(self) -> None:
         if self.pjsk:

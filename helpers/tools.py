@@ -1,6 +1,5 @@
 import secrets
 import string
-from typing import Any
 
 import discord
 from discord.ext import commands
@@ -19,17 +18,16 @@ def escape_md(text: str, markdown: bool = True, mentions: bool = True) -> str:
     return text
 
 
-def command_mention(bot: commands.Bot, name: str) -> str | None:
-    """Get a command mention from its name, refreshing the bot's id cache."""
-    app_commands: list[discord.app_commands.AppCommand] = bot.app_commands  # type: ignore[attr-defined]
-    for cmd in app_commands:
-        if cmd.guild_id is None:
-            entry: Any = bot.tree._global_commands[cmd.name]
-        else:
-            entry = bot.tree._guild_commands[cmd.guild_id][cmd.name]
-        entry.id = cmd.id
-    for cmd in bot.tree.get_commands():
-        resolved: Any = cmd
-        if resolved.qualified_name == name:
-            return f"</{resolved.qualified_name}:{resolved.id}>"
-    return None
+def command_mention(bot: commands.Bot, name: str) -> str:
+    """A clickable command mention (`</name:id>`) for a qualified command name.
+
+    Subcommands mention with their *root* command's id, so only the root needs
+    looking up. `bot.app_commands` is only populated once the tree has been synced
+    or fetched, so fall back to a plain `/name` rather than raising.
+    """
+    root = name.split(" ", 1)[0]
+    synced: list[discord.app_commands.AppCommand] = getattr(bot, "app_commands", [])
+    for cmd in synced:
+        if cmd.name == root:
+            return f"</{name}:{cmd.id}>"
+    return f"/{name}"

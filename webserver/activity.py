@@ -28,6 +28,8 @@ from cogs.guessing import (
     _fetch_bytes,
 )
 from data.pjsk import character_display_name
+from data.search import preprocess
+from data.song_equivalents import songs_equivalent
 from helpers import converters, unblock
 from webserver import redis_state, spectate
 
@@ -248,14 +250,17 @@ async def _build_round(
 
 
 def _match(pjsk: "PJSKData", round_data: dict[str, Any], guess: str):
+    """(id, display name, matched key). The key is the alias the query actually hit;
+    it's the display name itself for non-song rounds."""
     if round_data["type"] == "song":
-        music = converters.match_song(pjsk, guess)
-        return (music.id, music.title) if music else None
+        hit = converters.match_song_with_key(pjsk, guess)
+        return (hit[0].id, hit[0].title, hit[1]) if hit else None
     if round_data["type"] == "character":
         char = converters.match_character(pjsk, guess)
-        return (char.id, character_display_name(char)) if char else None
+        name = character_display_name(char) if char else ""
+        return (char.id, name, name) if char else None
     event = converters.match_event(pjsk, guess)
-    return (event.id, event.name) if event else None
+    return (event.id, event.name, event.name) if event else None
 
 
 def _meta(
@@ -418,7 +423,12 @@ async def submit_guess(
     matched = _match(_pjsk(state), meta, body.guess)
     if matched is None:
         return {"result": "not_found"}
-    if matched[0] == meta["answer_id"]:
+    correct = (
+        songs_equivalent(matched[0], meta["answer_id"])
+        if meta["type"] == "song"
+        else matched[0] == meta["answer_id"]
+    )
+    if correct:
         await redis_state.finish_round(body.round_id, user_id)
         if user_data:
             await user_data.add_guesses(user_id, meta["mode"], "success")
@@ -433,7 +443,11 @@ async def submit_guess(
         return resp
     if user_data:
         await user_data.add_guesses(user_id, meta["mode"], "fail")
-    return {"result": "incorrect", "matched": matched[1]}
+    # matched_key is the alias the guess actually hit; omitted when it is the name
+    resp: dict[str, Any] = {"result": "incorrect", "matched": matched[1]}
+    if preprocess(matched[2]) != preprocess(matched[1]):
+        resp["matched_key"] = matched[2]
+    return resp
 
 
 # --- avatar proxy (activities can't load cdn.discordapp.com directly) -------

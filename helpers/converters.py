@@ -24,15 +24,36 @@ def match_difficulty(arg: str | None) -> str | None:
 
 
 def match_song(pjsk: PJSKData, arg: str | int | None) -> Music | None:
+    hit = match_song_with_key(pjsk, arg)
+    return hit[0] if hit else None
+
+
+def match_song_with_key(
+    pjsk: PJSKData, arg: str | int | None
+) -> tuple[Music, str] | None:
+    """The matched song plus the key (title or alias) the query actually hit."""
     if arg is None:
         return None
     q = str(arg).strip()
     if q.isdigit() and q != "39":
         music = pjsk.get_music(int(q))
         if music:
-            return music
-    mid = pjsk.best_song_id(q)
-    return pjsk.get_music(mid) if mid is not None else None
+            return music, q
+    hit = pjsk.best_song_id_key(q)
+    if hit is None:
+        return None
+    mid, key = hit
+    music = pjsk.get_music(mid)
+    return (music, key) if music else None
+
+
+def describe_song_match(title: str, key: str) -> str:
+    """`Title`, plus the alias that matched — omitted when it *is* the title."""
+    from data.search import preprocess
+
+    if preprocess(key) == preprocess(title):
+        return f"**`{title}`**"
+    return f"**`{title}`** (`{key}`)"
 
 
 def match_event(pjsk: PJSKData, arg: str | int | None) -> Event | None:

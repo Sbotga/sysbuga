@@ -255,6 +255,10 @@ class PJSKData:
     def best_song_id(self, query: str) -> int | None:
         return search.best_song_match(query)
 
+    def best_song_id_key(self, query: str) -> tuple[int, str] | None:
+        """The matched song id plus the key (title or alias) that matched it."""
+        return search.best_song_match_key(query)
+
     def best_event_id(self, query: str) -> int | None:
         return search.best_event_match(query)
 

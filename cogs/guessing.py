@@ -13,6 +13,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from data.pjsk import character_display_name
+from data.song_equivalents import songs_equivalent
 from database.queries import GUESS_LEADERBOARD_PER_PAGE
 from helpers import converters, embeds, tools, unblock
 from helpers.autocompletes import autocompletes
@@ -280,22 +281,24 @@ class GuessCog(commands.Cog):
     async def _check_song(
         self, message: discord.Message, data: dict, content: str
     ) -> None:
-        music = converters.match_song(self.bot.pjsk, content)  # type: ignore[arg-type]
+        hit = converters.match_song_with_key(self.bot.pjsk, content)  # type: ignore[arg-type]
         if self.guess_ended(self.bot, data):
             return
-        if not music:
+        if not hit:
             await message.reply(
                 embed=embeds.error_embed(
                     f"Couldn't find a song matching `{content}`.", title="Incorrect"
                 )
             )
             return
-        if music.id == data["answer"]:
+        music, key = hit
+        if songs_equivalent(music.id, data["answer"]):
             await self._award(message, data)
         else:
             await message.reply(
                 embed=embeds.error_embed(
-                    f"Incorrectly guessed **`{music.title}`**.", title="Incorrect"
+                    f"Incorrectly guessed {converters.describe_song_match(music.title, key)}.",
+                    title="Incorrect",
                 )
             )
             await self._record_fail(message, data)

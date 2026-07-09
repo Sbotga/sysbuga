@@ -1,0 +1,5 @@
+{
+  "_comment": "the key is the song, the list of ids are the songs that should match (eg. 388 in list would match 141 as key, but without a 141: 388 key, then 141 would not match 388)",
+  "131": [388],
+  "388": [131]
+}
