@@ -27,6 +27,8 @@ let selfAvatar = null; // discord avatar hash (or null)
 let instanceId = ""; // discord activity instance id (the room key)
 let roomMembers = []; // [{id, name, avatar, active}] everyone connected to this instance
 let spectateTarget = null; // id we're currently watching, or null
+let spectateName = ""; // display name of the current/last spectate target
+let pendingSpectate = null; // target that left; auto-resume if they rejoin
 let spectateTimerHandle = null;
 let hubClosing = false;
 let heartbeatHandle = null;
@@ -354,12 +356,15 @@ async function submitGuess(event) {
   }
 
   if (result.result === "correct") {
-    playerLog("✅", guess, "right");
+    // show what they typed, and what it resolved to when that differs (an alias)
+    const text = guess === result.answer ? guess : `${guess} → ${result.answer}`;
+    playerLog("✅", text, "right");
     showReveal({ ...currentRound, ...result }, `Correct! It was ${result.answer}.`, "good");
   } else if (result.result === "expired") {
     showReveal({ ...currentRound, ...result }, `Time's up! It was ${result.answer}.`, "bad");
   } else if (result.result === "incorrect") {
-    playerLog("❌", result.matched, "wrong");
+    // their actual guess plus the fuzzy match it landed on
+    playerLog("❌", `${guess} → ${result.matched}`, "wrong");
     $("guess-input").value = "";
     hubSend({ op: "typing", text: "" });
     $("guess-input").focus();
@@ -491,6 +496,7 @@ function onHubMessage(msg) {
     case "members":
       roomMembers = msg.members || [];
       if (!$("spectate-modal").hidden) renderSpectateList();
+      maybeResumeSpectate();
       break;
     case "watchers":
       renderWatchers(msg.watchers || []);
@@ -514,9 +520,19 @@ function onHubMessage(msg) {
       if (spectateTarget === msg.from) spectateCleared();
       break;
     case "watch_target_gone":
-      if (spectateTarget === msg.target) spectateGone();
+      if (spectateTarget === msg.target) spectateGone(msg.target);
       break;
   }
+}
+
+// if the person we were watching left and then rejoins the room, re-attach
+function maybeResumeSpectate() {
+  if (!pendingSpectate) return;
+  const m = roomMembers.find((x) => x.id === pendingSpectate);
+  if (!m) return;
+  const id = pendingSpectate;
+  pendingSpectate = null;
+  startSpectating(id, m.name || spectateName);
 }
 
 // throttle live typing so we send at most ~1 update per 120ms (with a trailing send)
@@ -621,8 +637,20 @@ function renderSpectateList() {
 
 // --- spectate view ---
 
+function _spectateBar() {
+  return document.querySelector("#screen-spectate .round-bar");
+}
+function _spectateBody() {
+  return document.querySelector("#screen-spectate .round-body");
+}
+
 function startSpectating(id, name) {
   spectateTarget = id;
+  spectateName = name || "";
+  pendingSpectate = null;
+  _spectateBar().hidden = false;
+  _spectateBody().hidden = false;
+  $("spectate-gone").hidden = true;
   resetSpectateView();
   $("spectate-title").textContent = `Watching ${name || "…"}`;
   show("spectate");
@@ -632,6 +660,7 @@ function startSpectating(id, name) {
 function stopSpectating() {
   if (spectateTarget) hubSend({ op: "watch", target: null });
   spectateTarget = null;
+  pendingSpectate = null;
   stopSpectateTimer();
   show("home");
 }
@@ -714,12 +743,14 @@ function spectateCleared() {
   $("spectate-prompt").textContent = "They're not in a round right now.";
 }
 
-function spectateGone() {
+function spectateGone(target) {
   stopSpectateTimer();
   spectateTarget = null;
-  resetSpectateView();
-  $("spectate-prompt").textContent = "They left the activity.";
-  $("spectate-result").textContent = "Go back to pick someone else.";
+  pendingSpectate = target || null; // auto-resume when they rejoin the room
+  // take over the whole screen so it's unmistakable they left
+  _spectateBar().hidden = true;
+  _spectateBody().hidden = true;
+  $("spectate-gone").hidden = false;
 }
 
 function startSpectateTimer(expiresAt) {
@@ -784,6 +815,10 @@ $("spectate-modal").addEventListener("click", (e) => {
   if (e.target === $("spectate-modal")) closeSpectatePicker();
 });
 $("spectate-stop").addEventListener("click", stopSpectating);
+$("spectate-gone-back").addEventListener("click", () => {
+  pendingSpectate = null; // they chose to leave, don't auto-resume
+  show("home");
+});
 
 // version stamp (also proves which app.js is actually running); inline styles so
 // it shows even if style.css is stale, and it renders before boot in case boot errors

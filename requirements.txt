@@ -41,3 +41,6 @@ colorama
 
 # redis
 redis
+
+# websockets
+websockets
