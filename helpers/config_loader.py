@@ -8,6 +8,8 @@ class ConfigDiscord(TypedDict):
     token: str
     client_secret: str
     client_id: NotRequired[str]
+    tos_url: NotRequired[str]
+    privacy_url: NotRequired[str]
     owner_ids: list[int]
     support_invite: str
     support_id: int

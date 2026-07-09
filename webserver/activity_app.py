@@ -149,10 +149,17 @@ def create_app() -> FastAPI:
 
     @app.get("/api/config")
     async def api_config() -> dict[str, str]:
-        return {
+        discord_cfg = app.state.config["discord"]
+        payload = {
             "client_id": app.state.client_id,
-            "name": app.state.config["discord"]["name"],
+            "name": discord_cfg["name"],
         }
+        # blank legal links are omitted entirely, so the client can just test presence
+        for key in ("tos_url", "privacy_url"):
+            value = str(discord_cfg.get(key) or "").strip()
+            if value:
+                payload[key] = value
+        return payload
 
     @app.post("/api/oauth/token")
     async def oauth_token(body: TokenBody) -> dict[str, str]:
