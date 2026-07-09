@@ -280,10 +280,14 @@ class SongInfo(commands.Cog):
         base = self.bot.pjsk.get_music(music_id) if music_id is not None else None  # type: ignore[union-attr]
         original = base.title if base else "Unknown"
 
+        official_creator = (info.get("officialCreator") or {}).get("name")
+
         desc_lines = []
         if mirror and not hide_chart:
             desc_lines += ["***MIRRORED CHART***", ""]
         desc_lines.append(f"**Original Song:** {original}")
+        if official_creator:
+            desc_lines.append(f"**Official Creator:** {official_creator}")
         if description.strip():
             desc_lines += ["", description]
         else:

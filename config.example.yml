@@ -12,7 +12,7 @@ sbuga:
   api_url: "https://api.sbuga.com"
   sonolus_url: "https://sonolus.sbuga.com"
   asset_base_url: ""              # R2 public base url; empty = use the API passthrough
-  alias_token: ""                 # service token for alias editing
+  bot_token: ""                   # bot account token (Authorization: Bot <token>); needs manage_aliases
   image_type: "webp"              # webp | png
   regions: ["en", "jp", "kr", "tw"]  # merge priority order
   refresh_interval: 300           # seconds between data-version polls

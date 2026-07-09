@@ -55,7 +55,7 @@ class SbugaBot(commands.Bot):
         self.sbuga = SbugaClient(
             scfg["api_url"],
             image_type=scfg["image_type"],  # type: ignore[arg-type]
-            alias_token=scfg["alias_token"],
+            bot_token=scfg["bot_token"],
         )
         self.pjsk = PJSKData(
             self.sbuga,

@@ -5,6 +5,9 @@ import aiohttp
 
 from data.models import Music
 from services.models import (
+    AddEventAliasBody,
+    AddSongAliasBody,
+    AliasAddResponse,
     CheckWordsBody,
     Comic,
     ComicsResponse,
@@ -19,10 +22,12 @@ from services.models import (
     MusicsResponse,
     ProfileResponse,
     Region,
+    RemoveAliasBody,
     SongAlias,
     SongAliasesResponse,
     Stamp,
     StampsResponse,
+    SuccessResponse,
     VersionResponse,
     WhyInappropriateResponse,
 )
@@ -59,11 +64,11 @@ class SbugaClient:
         api_url: str,
         *,
         image_type: ImageType = "webp",
-        alias_token: str = "",
+        bot_token: str = "",
     ) -> None:
         self.base = api_url.rstrip("/")
         self.image_type: ImageType = image_type
-        self.alias_token = alias_token
+        self.bot_token = bot_token
         self._session: aiohttp.ClientSession | None = None
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
@@ -92,7 +97,9 @@ class SbugaClient:
         session = await self._ensure_session()
         headers: dict[str, str] = {}
         if auth:
-            headers["X-Service-Token"] = self.alias_token
+            # the backend resolves a bot token to its account row, so permissions
+            # (manage_aliases) work exactly like a human account's
+            headers["Authorization"] = f"Bot {self.bot_token}"
         async with session.request(
             method, self._url(path), params=_clean(params), json=json, headers=headers
         ) as resp:
@@ -249,8 +256,8 @@ class SbugaClient:
     async def get_master(self, file: str, region: Region) -> Any:
         return await self._get(f"/pjsk_data/master/{file}", region=region)
 
-    # --- aliases (reads are public; editing is disabled until the
-    #     service-token auth path ships, see MISSING_SBUGA_ROUTES.md #2) ---
+    # --- aliases (reads are public; editing needs a bot token whose account has
+    #     the `manage_aliases` permission) ---
 
     async def get_song_aliases(self) -> list[SongAlias]:
         return SongAliasesResponse.model_validate(
@@ -262,49 +269,49 @@ class SbugaClient:
             await self._get("/manage/alias/event")
         ).aliases
 
-    # async def add_song_alias(
-    #     self, music_id: int, alias: str, region: Region | None = None
-    # ) -> AliasAddResponse:
-    #     data = await self._request(
-    #         "POST",
-    #         "/manage/alias/song",
-    #         json=AddSongAliasBody(
-    #             music_id=music_id, alias=alias, region=region
-    #         ).model_dump(),
-    #         auth=True,
-    #     )
-    #     return AliasAddResponse.model_validate(data)
+    async def add_song_alias(
+        self, music_id: int, alias: str, region: Region | None = None
+    ) -> AliasAddResponse:
+        data = await self._request(
+            "POST",
+            "/manage/alias/song",
+            json=AddSongAliasBody(
+                music_id=music_id, alias=alias, region=region
+            ).model_dump(),
+            auth=True,
+        )
+        return AliasAddResponse.model_validate(data)
 
-    # async def remove_song_alias(self, alias_id: int) -> SuccessResponse:
-    #     data = await self._request(
-    #         "DELETE",
-    #         "/manage/alias/song",
-    #         json=RemoveAliasBody(alias_id=alias_id).model_dump(),
-    #         auth=True,
-    #     )
-    #     return SuccessResponse.model_validate(data)
+    async def remove_song_alias(self, alias_id: int) -> SuccessResponse:
+        data = await self._request(
+            "DELETE",
+            "/manage/alias/song",
+            json=RemoveAliasBody(alias_id=alias_id).model_dump(),
+            auth=True,
+        )
+        return SuccessResponse.model_validate(data)
 
-    # async def add_event_alias(
-    #     self, event_id: int, alias: str, region: Region | None = None
-    # ) -> AliasAddResponse:
-    #     data = await self._request(
-    #         "POST",
-    #         "/manage/alias/event",
-    #         json=AddEventAliasBody(
-    #             event_id=event_id, alias=alias, region=region
-    #         ).model_dump(),
-    #         auth=True,
-    #     )
-    #     return AliasAddResponse.model_validate(data)
+    async def add_event_alias(
+        self, event_id: int, alias: str, region: Region | None = None
+    ) -> AliasAddResponse:
+        data = await self._request(
+            "POST",
+            "/manage/alias/event",
+            json=AddEventAliasBody(
+                event_id=event_id, alias=alias, region=region
+            ).model_dump(),
+            auth=True,
+        )
+        return AliasAddResponse.model_validate(data)
 
-    # async def remove_event_alias(self, alias_id: int) -> SuccessResponse:
-    #     data = await self._request(
-    #         "DELETE",
-    #         "/manage/alias/event",
-    #         json=RemoveAliasBody(alias_id=alias_id).model_dump(),
-    #         auth=True,
-    #     )
-    #     return SuccessResponse.model_validate(data)
+    async def remove_event_alias(self, alias_id: int) -> SuccessResponse:
+        data = await self._request(
+            "DELETE",
+            "/manage/alias/event",
+            json=RemoveAliasBody(alias_id=alias_id).model_dump(),
+            auth=True,
+        )
+        return SuccessResponse.model_validate(data)
 
 
 def _clean(params: dict[str, Any] | None) -> dict[str, Any] | None:

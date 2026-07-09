@@ -17,7 +17,7 @@ class ConfigDiscord(TypedDict):
 class ConfigSbuga(TypedDict):
     api_url: str
     asset_base_url: str
-    alias_token: str
+    bot_token: str
     image_type: str
     regions: list[str]
     refresh_interval: int

@@ -10,8 +10,13 @@ from discord.ext import commands
 
 from helpers import converters, embeds
 from helpers.autocompletes import autocompletes
+from helpers.config_loader import get_config
 from helpers.emojis import emojis
 from services.sbuga import SbugaError, SbugaNotFound
+
+# /alias is a support-server-only tool (`/song aliases` is the public read).
+# Registering it as a guild command keeps it out of every other server's picker.
+_SUPPORT_GUILD_ID: int | None = get_config()["discord"].get("support_id") or None
 
 if TYPE_CHECKING:
     from main import SbugaBot
@@ -29,12 +34,36 @@ class InfoCog(commands.Cog):
         while log and log[0][1] < cutoff:
             log.popleft()
 
+    def _in_support_server(self, interaction: discord.Interaction) -> bool:
+        """Alias editing is confined to the support server — the manager roles only
+        exist there, and the /alias group is installable anywhere."""
+        support_id = self.bot.config["discord"].get("support_id")
+        return bool(support_id) and interaction.guild_id == support_id
+
     def _is_alias_mod(self, user: discord.abc.User | discord.Member) -> bool:
         if user.id in (self.bot.owner_ids or set()):
             return True
         role_ids = set(self.bot.config["discord"].get("alias_manager_role_ids", []))
         user_roles = {r.id for r in getattr(user, "roles", [])}
         return bool(role_ids & user_roles)
+
+    async def _deny_alias_edit(self, interaction: discord.Interaction) -> bool:
+        """Reply and return True if this caller may not edit aliases here."""
+        if not self._in_support_server(interaction):
+            await interaction.response.send_message(
+                embed=embeds.error_embed(
+                    "Alias commands can only be used in the support server."
+                ),
+                ephemeral=True,
+            )
+            return True
+        if not self._is_alias_mod(interaction.user):
+            await interaction.response.send_message(
+                embed=embeds.error_embed("You're not authorized to manage aliases."),
+                ephemeral=True,
+            )
+            return True
+        return False
 
     @commands.Cog.listener()
     async def on_app_command_completion(
@@ -267,13 +296,12 @@ class InfoCog(commands.Cog):
     # --- alias group (reads are public; editing disabled until the
     #     service-token auth path ships, see MISSING_SBUGA_ROUTES.md #2) ---
 
+    # guild-scoped: only ever registered to the support server, so it never appears
+    # elsewhere. Not user-installable and not usable in DMs.
     alias = app_commands.Group(
         name="alias",
-        description="Song aliases.",
-        allowed_installs=app_commands.AppInstallationType(guild=True, user=True),
-        allowed_contexts=app_commands.AppCommandContext(
-            guild=True, dm_channel=True, private_channel=True
-        ),
+        description="Song aliases (support server only).",
+        guild_ids=[_SUPPORT_GUILD_ID] if _SUPPORT_GUILD_ID else None,
     )
 
     @alias.command(name="list", description="View a song's aliases.")
@@ -307,84 +335,76 @@ class InfoCog(commands.Cog):
         embed.set_footer(text=f"Song ID {music.id} - {len(names)} aliases")
         await interaction.followup.send(embed=embed)
 
-    # @alias.command(name="add", description="Authorized only; add a song alias.")
-    # @app_commands.autocomplete(song=autocompletes.pjsk_song)
-    # @app_commands.describe(song="Song name or ID.", alias="Alias to add.")
-    # async def add_alias(
-    #     self, interaction: discord.Interaction, song: str, alias: str
-    # ) -> None:
-    #     if not self._is_alias_mod(interaction.user):
-    #         await interaction.response.send_message(
-    #             embed=embeds.error_embed("You're not authorized to manage aliases."),
-    #             ephemeral=True,
-    #         )
-    #         return
-    #     await interaction.response.defer(thinking=True)
-    #     music = converters.match_song(self.bot.pjsk, song)  # type: ignore[arg-type]
-    #     if not music:
-    #         await interaction.followup.send(
-    #             embed=embeds.error_embed(f"Couldn't find a song matching `{song}`.")
-    #         )
-    #         return
-    #     try:
-    #         await self.bot.sbuga.add_song_alias(music.id, alias.lower())  # type: ignore[union-attr]
-    #     except SbugaError as e:
-    #         await interaction.followup.send(
-    #             embed=embeds.error_embed(f"Couldn't add alias: {e.detail or e.status}")
-    #         )
-    #         return
-    #     await interaction.followup.send(
-    #         embed=embeds.success_embed(
-    #             f"Added alias for `{music.title}` (ID `{music.id}`)\nAlias: `{alias.lower()}`",
-    #             title="Added alias!",
-    #         )
-    #     )
+    @alias.command(name="add", description="Authorized only; add a song alias.")
+    @app_commands.autocomplete(song=autocompletes.pjsk_song)
+    @app_commands.describe(song="Song name or ID.", alias="Alias to add.")
+    async def add_alias(
+        self, interaction: discord.Interaction, song: str, alias: str
+    ) -> None:
+        if await self._deny_alias_edit(interaction):
+            return
+        await interaction.response.defer(thinking=True)
+        music = converters.match_song(self.bot.pjsk, song)  # type: ignore[arg-type]
+        if not music:
+            await interaction.followup.send(
+                embed=embeds.error_embed(f"Couldn't find a song matching `{song}`.")
+            )
+            return
+        try:
+            await self.bot.sbuga.add_song_alias(music.id, alias.lower())  # type: ignore[union-attr]
+        except SbugaError as e:
+            await interaction.followup.send(
+                embed=embeds.error_embed(f"Couldn't add alias: {e.detail or e.status}")
+            )
+            return
+        await interaction.followup.send(
+            embed=embeds.success_embed(
+                f"Added alias for `{music.title}` (ID `{music.id}`)\nAlias: `{alias.lower()}`",
+                title="Added alias!",
+            )
+        )
 
-    # @alias.command(name="remove", description="Authorized only; remove a song alias.")
-    # @app_commands.autocomplete(song=autocompletes.pjsk_song)
-    # @app_commands.describe(song="Song name or ID.", alias="Alias to remove.")
-    # async def remove_alias(
-    #     self, interaction: discord.Interaction, song: str, alias: str
-    # ) -> None:
-    #     if not self._is_alias_mod(interaction.user):
-    #         await interaction.response.send_message(
-    #             embed=embeds.error_embed("You're not authorized to manage aliases."),
-    #             ephemeral=True,
-    #         )
-    #         return
-    #     await interaction.response.defer(thinking=True)
-    #     music = converters.match_song(self.bot.pjsk, song)  # type: ignore[arg-type]
-    #     if not music:
-    #         await interaction.followup.send(
-    #             embed=embeds.error_embed(f"Couldn't find a song matching `{song}`.")
-    #         )
-    #         return
-    #     target = alias.lower().strip()
-    #     try:
-    #         existing = await self.bot.sbuga.get_song_aliases()  # type: ignore[union-attr]
-    #         match = next(
-    #             (a for a in existing if a.music_id == music.id and a.alias == target),
-    #             None,
-    #         )
-    #         if not match:
-    #             await interaction.followup.send(
-    #                 embed=embeds.error_embed(f"No alias `{target}` on `{music.title}`.")
-    #             )
-    #             return
-    #         await self.bot.sbuga.remove_song_alias(match.id)  # type: ignore[union-attr]
-    #     except SbugaError as e:
-    #         await interaction.followup.send(
-    #             embed=embeds.error_embed(
-    #                 f"Couldn't remove alias: {e.detail or e.status}"
-    #             )
-    #         )
-    #         return
-    #     await interaction.followup.send(
-    #         embed=embeds.success_embed(
-    #             f"Removed alias for `{music.title}` (ID `{music.id}`)\nAlias: `{target}`",
-    #             title="Removed alias!",
-    #         )
-    #     )
+    @alias.command(name="remove", description="Authorized only; remove a song alias.")
+    @app_commands.autocomplete(song=autocompletes.pjsk_song)
+    @app_commands.describe(song="Song name or ID.", alias="Alias to remove.")
+    async def remove_alias(
+        self, interaction: discord.Interaction, song: str, alias: str
+    ) -> None:
+        if await self._deny_alias_edit(interaction):
+            return
+        await interaction.response.defer(thinking=True)
+        music = converters.match_song(self.bot.pjsk, song)  # type: ignore[arg-type]
+        if not music:
+            await interaction.followup.send(
+                embed=embeds.error_embed(f"Couldn't find a song matching `{song}`.")
+            )
+            return
+        target = alias.lower().strip()
+        try:
+            existing = await self.bot.sbuga.get_song_aliases()  # type: ignore[union-attr]
+            match = next(
+                (a for a in existing if a.music_id == music.id and a.alias == target),
+                None,
+            )
+            if not match:
+                await interaction.followup.send(
+                    embed=embeds.error_embed(f"No alias `{target}` on `{music.title}`.")
+                )
+                return
+            await self.bot.sbuga.remove_song_alias(match.id)  # type: ignore[union-attr]
+        except SbugaError as e:
+            await interaction.followup.send(
+                embed=embeds.error_embed(
+                    f"Couldn't remove alias: {e.detail or e.status}"
+                )
+            )
+            return
+        await interaction.followup.send(
+            embed=embeds.success_embed(
+                f"Removed alias for `{music.title}` (ID `{music.id}`)\nAlias: `{target}`",
+                title="Removed alias!",
+            )
+        )
 
 
 async def setup(bot: SbugaBot) -> None:

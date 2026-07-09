@@ -70,7 +70,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     sbuga = SbugaClient(
         scfg["api_url"],
         image_type=scfg["image_type"],  # type: ignore[arg-type]
-        alias_token=scfg["alias_token"],
+        bot_token=scfg["bot_token"],
     )
     pjsk = PJSKData(
         sbuga,
