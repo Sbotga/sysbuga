@@ -7,7 +7,7 @@ discord:
   support_invite: ""
   support_id: 0                   # support server guild id
   alias_manager_role_ids: []      # roles that can manage aliases
-  # legal links; blank = omitted from /api/config entirely
+  # legal links shown in /help; blank = the line is omitted
   tos_url: ""
   privacy_url: ""
 

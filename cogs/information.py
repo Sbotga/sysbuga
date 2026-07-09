@@ -129,12 +129,22 @@ class InfoCog(commands.Cog):
     async def help(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(thinking=True)
         assert self.bot.user
-        support = self.bot.config["discord"].get("support_invite", "")
+        discord_cfg = self.bot.config["discord"]
+        links = [
+            f"**Invite:** https://discord.com/oauth2/authorize?client_id={self.bot.user.id}"
+        ]
+        for label, key in (
+            ("Support", "support_invite"),
+            ("Terms of Service", "tos_url"),
+            ("Privacy Policy", "privacy_url"),
+        ):
+            url = str(discord_cfg.get(key) or "").strip()
+            if url:  # blank links are omitted rather than rendered empty
+                links.append(f"**{label}:** {url}")
         embed = embeds.embed(
             title=self.bot.user.name,
             description=(
-                f"**Invite:** https://discord.com/oauth2/authorize?client_id={self.bot.user.id}\n"
-                f"**Support:** {support}\n\n"
+                "\n".join(links) + "\n\n"
                 f"-# {self.bot.user.mention} is not affiliated with SEGA, Colorful Palette, or Project Sekai."
             ),
         )
