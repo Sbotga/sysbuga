@@ -72,6 +72,14 @@ class PJSKData:
             return f"{self.asset_base_url}/pjsk_data/{region}/{full}"
         return self.client.asset_url(full, region)  # type: ignore[arg-type]
 
+    def chart_source_url(self, music_id: int, difficulty: str, region: str) -> str:
+        """The raw SUS (.txt) for a chart, alongside the rendered chart pngs on R2."""
+        region = self.ASSET_REGION.get(region, region)
+        path = f"music/music_score/{str(music_id).zfill(4)}_01/{difficulty}.txt"
+        if self.asset_base_url:
+            return f"{self.asset_base_url}/pjsk_data/{region}/{path}"
+        return self.client.asset_url(path, region)  # type: ignore[arg-type]
+
     # --- disk ---
 
     @staticmethod

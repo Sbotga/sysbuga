@@ -22,3 +22,7 @@ synced_commands.data
 # sensitive proprietary libraries/executables that should not be publically available
 libraries/nxsk-chart-preview
 libraries/nxsk-chart-preview.exe
+
+# random generated files by library
+libraries/imgui.ini
+libraries/settings.json

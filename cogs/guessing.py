@@ -19,6 +19,7 @@ from helpers import converters, embeds, tools, unblock
 from helpers.autocompletes import autocompletes
 from helpers.emojis import emojis
 from helpers.views import SbugaView
+from services import chart_clip, chart_preview
 from services.sbuga import SbugaError
 
 if TYPE_CHECKING:
@@ -27,8 +28,8 @@ if TYPE_CHECKING:
 GUESS_TIME = 60
 MODE_TIME = {"character": 30, "character_bw": 30, "chart_append": 20}
 GUESS_PREFIX = "-"
-# rerolls when a round's asset can't be fetched (missing on the CDN, or a transient blip)
 _ASSET_ATTEMPTS = 5
+_CHART_CLIP_ATTEMPTS = 3  # capped lower: each attempt may render a video
 
 
 async def _fetch_bytes(url: str) -> bytes | None:
@@ -37,19 +38,6 @@ async def _fetch_bytes(url: str) -> bytes | None:
             if resp.status != 200:
                 return None
             return await resp.read()
-
-
-def _crop_square(data: bytes, size: int, bw: bool) -> io.BytesIO:
-    arr = np.array(Image.open(io.BytesIO(data)).convert("L" if bw else "RGB"))
-    h, w = arr.shape[:2]
-    size = min(size, w, h)
-    x = random.randint(0, w - size)
-    y = random.randint(0, h - size)
-    out = Image.fromarray(arr[y : y + size, x : x + size])
-    f = io.BytesIO()
-    out.save(f, "PNG")
-    f.seek(0)
-    return f
 
 
 def _crop_chart(data: bytes) -> io.BytesIO:
@@ -71,14 +59,29 @@ def _crop_chart(data: bytes) -> io.BytesIO:
     return f
 
 
+def _crop_square(data: bytes, size: int, bw: bool) -> io.BytesIO:
+    arr = np.array(Image.open(io.BytesIO(data)).convert("L" if bw else "RGB"))
+    h, w = arr.shape[:2]
+    size = min(size, w, h)
+    x = random.randint(0, w - size)
+    y = random.randint(0, h - size)
+    out = Image.fromarray(arr[y : y + size, x : x + size])
+    f = io.BytesIO()
+    out.save(f, "PNG")
+    f.seek(0)
+    return f
+
+
 class GuessCog(commands.Cog):
     def __init__(self, bot: SbugaBot) -> None:
         self.bot = bot
         self.bot.cache.guess_channels = {}
+        chart_clip.cleanup_stale()
         self.check_guess_task.start()
 
     async def cog_unload(self) -> None:
         self.check_guess_task.cancel()
+        await chart_preview.stop()
 
     # --- random pickers ---
 
@@ -114,11 +117,8 @@ class GuessCog(commands.Cog):
         ]
         return random.choice(events) if events else None
 
-    # --- pickers that survive a missing asset ---
-    #
-    # A few entries are structurally unrenderable (region-exclusive songs whose jacket was
-    # never mirrored, one card with no untrained art) and any CDN fetch can blip. Rerolling
-    # turns "That guessing mode isn't available yet" into a different, working round.
+    # --- pickers that reroll past a missing asset ---
+    # some entries are permanently unrenderable (unmirrored jackets, cards without trained art)
 
     async def _pick_song_jacket(self):
         for _ in range(_ASSET_ATTEMPTS):
@@ -131,6 +131,7 @@ class GuessCog(commands.Cog):
         return None
 
     async def _pick_chart_image(self, has_append: bool, mirror: bool):
+        # fallback when the clip renderer isn't installed: the old cropped-chart round
         for _ in range(_ASSET_ATTEMPTS):
             music = self._random_song(
                 has_append=has_append, needs_master=not has_append
@@ -144,6 +145,42 @@ class GuessCog(commands.Cog):
             except SbugaError:
                 continue
             return music, png, difficulty
+        return None
+
+    async def _fetch_chart_sus(
+        self, music_id: int, difficulty: str, region: str
+    ) -> str | None:
+        url = self.bot.pjsk.chart_source_url(music_id, difficulty, region)  # type: ignore[union-attr]
+        raw = await _fetch_bytes(url)
+        return raw.decode("utf-8", "replace") if raw else None
+
+    async def _pick_chart_clip(self, has_append: bool, mirror: bool):
+        for _ in range(_CHART_CLIP_ATTEMPTS):
+            music = self._random_song(
+                has_append=has_append, needs_master=not has_append
+            )
+            if not music:
+                return None
+            difficulty = "append" if has_append else "master"
+            region = next((r for r in self.bot.pjsk.regions_for_music(music.id) if r in ("en", "jp")), "en")  # type: ignore[union-attr]
+            sus_text = await self._fetch_chart_sus(music.id, difficulty, region)
+            if not sus_text:
+                continue
+            try:
+                clip = await chart_clip.render_clip(sus_text, mirror=mirror)
+            except chart_clip.ChartClipError as exc:
+                self.bot.warn(
+                    f"chart clip render failed ({music.id} {difficulty}): {exc}"
+                )
+                continue
+            if not clip:
+                continue
+            # full chart for the reveal (best-effort)
+            try:
+                png = await self.bot.sbuga.get_chart_image(music.id, difficulty, region, mirrored=mirror)  # type: ignore[union-attr,arg-type]
+            except SbugaError:
+                png = None
+            return music, clip, png, difficulty
         return None
 
     async def _pick_card_art(self):
@@ -538,24 +575,48 @@ class GuessCog(commands.Cog):
 
             if mode in ("chart", "chart_append"):
                 mirror = bool(settings["mirror_charts_by_default"])
-                hit = await self._pick_chart_image(has_append, mirror)
+                mirror_note = (
+                    "\n\n**Chart is mirrored! (your setting)**" if mirror else ""
+                )
+
+                if not chart_preview.available():
+                    # no renderer installed: fall back to the old cropped chart image
+                    hit = await self._pick_chart_image(has_append, mirror)
+                    if not hit:
+                        return None, None
+                    music, png, diff = hit
+                    guess["answer"] = music.id
+                    guess["answerName"] = music.title
+                    guess["answer_file_path"] = io.BytesIO(png)
+                    cropped = await unblock.to_process_with_timeout(_crop_chart, png)
+                    embed = embeds.embed(
+                        title="Guess The Chart", color=discord.Color.dark_gold()
+                    )
+                    embed.set_image(url="attachment://image.png")
+                    embed.description = (
+                        f"Guess the song from a cropped {diff} chart.\n"
+                        f"Use `{GUESS_PREFIX}your guess` to guess. You have {secs} seconds."
+                        + mirror_note
+                    )
+                    return embed, discord.File(cropped, "image.png")
+
+                hit = await self._pick_chart_clip(has_append, mirror)
                 if not hit:
                     return None, None
-                music, png, diff = hit
+                music, clip, png, diff = hit
                 guess["answer"] = music.id
                 guess["answerName"] = music.title
-                guess["answer_file_path"] = io.BytesIO(png)
-                guess["data"]["is_chart"] = True
-                cropped = await unblock.to_process_with_timeout(_crop_chart, png)
+                if png:  # reveal (/guess end) still shows the full chart
+                    guess["answer_file_path"] = io.BytesIO(png)
                 embed = embeds.embed(
                     title="Guess The Chart", color=discord.Color.dark_gold()
                 )
-                embed.set_image(url="attachment://image.png")
                 embed.description = (
-                    f"Guess the song from a cropped {diff} chart.\nUse `{GUESS_PREFIX}your guess` to guess. You have {secs} seconds."
-                    + ("\n\n**Chart is mirrored! (your setting)**" if mirror else "")
+                    f"Guess the song from a ~10 second {diff} chart clip.\n"
+                    f"Use `{GUESS_PREFIX}your guess` to guess. You have {secs} seconds."
+                    + mirror_note
                 )
-                return embed, discord.File(cropped, "image.png")
+                return embed, discord.File(io.BytesIO(clip), "chart.mp4")
 
             hit = await self._pick_song_jacket()
             if not hit:

@@ -44,3 +44,5 @@ redis
 
 # websockets
 websockets
+# chart clip rendering (sus cut + LevelData export for /guess chart)
+sonolus_converters @ git+https://github.com/UntitledCharts/sonolus-level-converters

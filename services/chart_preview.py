@@ -1,8 +1,8 @@
-"""Render a Sonolus chart to MP4 with the bundled nxsk-chart-preview binary.
+"""Render Sonolus charts to MP4 via the nxsk-chart-preview binary.
 
-The renderer is an executable, not an importable library, so this drives it as a subprocess.
-It always creates an OpenGL context -- even for `--export` -- so on a headless Linux host the
-call is wrapped in `xvfb-run`. See the README's Ubuntu setup for the apt packages it needs.
+Run once in `--export-cli` server mode (GL context + assets load once): it prints READY,
+then renders one request per stdin line and replies "OK <path>" / "ERR <msg>". Needs an
+OpenGL context, so on a headless host it's wrapped in `xvfb-run`.
 """
 
 import asyncio
@@ -16,29 +16,27 @@ _EXECUTABLE = _LIBRARIES / (
     "nxsk-chart-preview.exe" if os.name == "nt" else "nxsk-chart-preview"
 )
 
-# Progress goes to stderr as "export: 1234/5678 frames (21.7%)"; keep the tail for error reports.
-_STDERR_TAIL = 2000
+_SERVER_START_TIMEOUT = 90.0  # one-time gl + asset load
 
-# Each render pins a CPU core for minutes. The subprocess never blocks the event loop,
-# but letting N of them run at once starves every other thread on the box -- including
-# the one answering Discord's heartbeat -- so the bot looks hung. Leave a core free.
-MAX_CONCURRENT_RENDERS = max(1, (os.cpu_count() or 2) - 1)
-_slots = asyncio.Semaphore(MAX_CONCURRENT_RENDERS)
+# one server; renders serialize through it (parallel software-gl renders just fight for cores)
+_lock = asyncio.Lock()
+_process: "asyncio.subprocess.Process | None" = None
+
+
+def available() -> bool:
+    """Whether the renderer binary is present. Callers can fall back when it isn't."""
+    return _EXECUTABLE.is_file()
 
 
 class ChartPreviewError(RuntimeError):
-    """The renderer exited non-zero. `stderr` holds the tail of its output."""
-
-    def __init__(self, returncode: int, stderr: str) -> None:
-        super().__init__(f"nxsk-chart-preview exited {returncode}: {stderr}")
+    def __init__(self, returncode: int, message: str) -> None:
+        super().__init__(f"nxsk-chart-preview: {message}")
         self.returncode = returncode
-        self.stderr = stderr
+        self.message = message
 
 
 def _headless_argv(argv: list[str]) -> list[str]:
-    """Wrap in Xvfb when there is no display. `-a` picks a free display number, so concurrent
-    renders don't collide -- though each one saturates a CPU core, so don't outrun `nproc`.
-    """
+    """Wrap in Xvfb when there is no display, so the GL context can be created headless."""
     if os.name == "nt" or os.environ.get("DISPLAY"):
         return argv
     xvfb_run = shutil.which("xvfb-run")
@@ -49,11 +47,10 @@ def _headless_argv(argv: list[str]) -> list[str]:
     return [xvfb_run, "-a", *argv]
 
 
-async def _kill_tree(process: asyncio.subprocess.Process) -> None:
-    """On Linux the child is `xvfb-run`, a shell script that forks Xvfb and the renderer.
-    Killing it alone orphans both, and the renderer keeps a core pinned until the host
-    reboots. The spawn puts them in their own process group so the group can be killed.
-    On Windows there is no wrapper, so the child *is* the renderer."""
+async def _kill_tree(process: "asyncio.subprocess.Process") -> None:
+    """kill the whole process group: on linux the child is `xvfb-run`, which forks xvfb +
+    the renderer, so killing just it orphans them. on windows the child is the renderer.
+    """
     try:
         if os.name == "nt":
             process.kill()
@@ -61,64 +58,121 @@ async def _kill_tree(process: asyncio.subprocess.Process) -> None:
             os.killpg(os.getpgid(process.pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass  # already gone
-    await process.wait()
+    try:
+        await process.wait()
+    except ProcessLookupError:
+        pass
+
+
+async def _stop_locked() -> None:
+    """Tear down the current server. Caller must hold `_lock`."""
+    global _process
+    if _process is not None:
+        await _kill_tree(_process)
+        _process = None
+
+
+async def _ensure_server() -> "asyncio.subprocess.Process":
+    """The live server, (re)starting it if it isn't running. Caller must hold `_lock`."""
+    global _process
+    if _process is not None and _process.returncode is None:
+        return _process
+    if not _EXECUTABLE.is_file():
+        raise ChartPreviewError(-1, f"renderer not found at {_EXECUTABLE}")
+
+    _process = await asyncio.create_subprocess_exec(
+        *_headless_argv([str(_EXECUTABLE), "--export-cli"]),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,  # per-frame progress noise
+        start_new_session=os.name != "nt",
+    )
+    assert _process.stdout is not None
+    try:
+        while True:
+            raw = await asyncio.wait_for(
+                _process.stdout.readline(), _SERVER_START_TIMEOUT
+            )
+            if not raw:
+                raise ChartPreviewError(-1, "renderer exited before READY")
+            if raw.decode("utf-8", "replace").strip() == "READY":
+                break
+    except (asyncio.TimeoutError, ChartPreviewError):
+        await _stop_locked()
+        raise ChartPreviewError(-1, "renderer failed to start") from None
+    return _process
+
+
+def _quote(token: str) -> str:
+    # nxsk strips quotes as pure grouping, so quoting everything is safe and handles spaces
+    return '"' + token + '"'
 
 
 async def render(
     chart: Path,
     output: Path,
     *,
-    bgm: Path | None = None,
-    cover: Path | None = None,
     settings: Path | None = None,
+    crf: int = 18,
     default_settings: bool = True,
-    timeout: float | None = 900.0,
+    timeout: float | None = 180.0,
 ) -> Path:
-    """Export `chart` (a Sonolus .json.gz level) to `output` as an MP4.
-
-    `settings` is the same override JSON the loader scripts write, and it can drive essentially
-    every knob the GUI exposes -- note speed, resolution/fps/encoder, stage and effect options,
-    the start screen, the warning text, the watermark. Top-level keys are locked for the run; an
-    optional "prefill" sub-object holds keys that stay editable.
-
-    `default_settings` passes --default-settings, which starts from the built-in defaults instead
-    of whatever settings.json happens to sit beside the binary, and stops the renderer writing one
-    back into libraries/. Combined with a settings file that means: clean baseline, then exactly
-    the keys you asked for -- reproducible regardless of host state. Turn it off only if you
-    deliberately want the saved settings as the baseline.
-
-    The whole chart is rendered -- there is no trim range -- so expect roughly a third of the
-    song's duration in wall time on a CPU-only host, and considerably less on a GPU.
-    """
-    if not _EXECUTABLE.is_file():
-        raise ChartPreviewError(-1, f"renderer not found at {_EXECUTABLE}")
-
-    argv = [str(_EXECUTABLE), str(chart)]
-    argv += [str(path) for path in (bgm, cover, settings) if path is not None]
-    if default_settings:
-        argv.append("--default-settings")
-    argv += ["--export", str(output)]
-
+    """Export `chart` (.json.gz) to `output` as MP4. `crf` is the per-render libx264 quality
+    (0-51, lower = better/larger); `default_settings` starts from built-in defaults so a
+    render doesn't inherit a previous request's state."""
     output.parent.mkdir(parents=True, exist_ok=True)
-    async with _slots:
-        process = await asyncio.create_subprocess_exec(
-            *_headless_argv(argv),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-            # own process group, so a timeout can take the whole tree down with it
-            start_new_session=os.name != "nt",
-        )
-        try:
-            _, stderr = await asyncio.wait_for(process.communicate(), timeout)
-        except asyncio.TimeoutError:
-            await _kill_tree(process)
-            raise ChartPreviewError(-1, f"timed out after {timeout}s") from None
-        except asyncio.CancelledError:
-            # the caller went away (command timed out, cog unloaded); don't leak a render
-            await _kill_tree(process)
-            raise
+    tokens = [str(chart)]
+    if settings is not None:
+        tokens.append(str(settings))
+    if default_settings:
+        tokens.append("--default-settings")
+    tokens += ["--crf", str(crf), "--export", str(output)]
+    request = (" ".join(_quote(t) for t in tokens) + "\n").encode("utf-8")
 
-    if process.returncode != 0:
-        tail = stderr.decode(errors="replace")[-_STDERR_TAIL:]
-        raise ChartPreviewError(process.returncode or -1, tail)
-    return output
+    async with _lock:
+        process = await _ensure_server()
+        assert process.stdin is not None and process.stdout is not None
+        try:
+            process.stdin.write(request)
+            await process.stdin.drain()
+            while True:
+                raw = await asyncio.wait_for(process.stdout.readline(), timeout)
+                if not raw:
+                    await _stop_locked()  # server died mid-request
+                    raise ChartPreviewError(-1, "renderer closed unexpectedly")
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                if line.startswith("OK "):
+                    return output
+                if line.startswith("ERR "):
+                    raise ChartPreviewError(1, line[4:])  # in sync; don't restart
+        except (
+            asyncio.TimeoutError,
+            asyncio.CancelledError,
+            BrokenPipeError,
+            ConnectionResetError,
+        ) as exc:
+            # mid-render or broken pipe: restart, or the next request reads this one's late reply
+            await _stop_locked()
+            if isinstance(exc, asyncio.TimeoutError):
+                raise ChartPreviewError(
+                    -1, f"render timed out after {timeout}s"
+                ) from None
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise ChartPreviewError(-1, "renderer pipe broke") from None
+
+
+async def stop() -> None:
+    """Shut the server down (graceful `quit`, then kill). Safe to call when none is running."""
+    async with _lock:
+        global _process
+        if _process is None:
+            return
+        if _process.returncode is None and _process.stdin is not None:
+            try:
+                _process.stdin.write(b"quit\n")
+                await _process.stdin.drain()
+                await asyncio.wait_for(_process.wait(), 5.0)
+            except (asyncio.TimeoutError, BrokenPipeError, ConnectionResetError):
+                await _kill_tree(_process)
+        _process = None
