@@ -19,6 +19,7 @@ from helpers import converters, embeds, tools, unblock
 from helpers.autocompletes import autocompletes
 from helpers.emojis import emojis
 from helpers.views import SbugaView
+from services.sbuga import SbugaError
 
 if TYPE_CHECKING:
     from main import SbugaBot
@@ -26,6 +27,8 @@ if TYPE_CHECKING:
 GUESS_TIME = 60
 MODE_TIME = {"character": 30, "character_bw": 30, "chart_append": 20}
 GUESS_PREFIX = "-"
+# rerolls when a round's asset can't be fetched (missing on the CDN, or a transient blip)
+_ASSET_ATTEMPTS = 5
 
 
 async def _fetch_bytes(url: str) -> bytes | None:
@@ -79,11 +82,15 @@ class GuessCog(commands.Cog):
 
     # --- random pickers ---
 
-    def _random_song(self, has_append: bool = False):
+    def _random_song(self, has_append: bool = False, needs_master: bool = False):
+        def has(music, difficulty: str) -> bool:
+            return any(d.difficulty == difficulty for d in music.difficulties)
+
         musics = [
             m
             for m in self.bot.pjsk.musics()  # type: ignore[union-attr]
-            if not has_append or any(d.difficulty == "append" for d in m.difficulties)
+            if (not has_append or has(m, "append"))
+            and (not needs_master or has(m, "master"))
         ]
         return random.choice(musics) if musics else None
 
@@ -106,6 +113,65 @@ class GuessCog(commands.Cog):
             if (e.start_at or 0) <= now and (e.background_url or e.banner_url)
         ]
         return random.choice(events) if events else None
+
+    # --- pickers that survive a missing asset ---
+    #
+    # A few entries are structurally unrenderable (region-exclusive songs whose jacket was
+    # never mirrored, one card with no untrained art) and any CDN fetch can blip. Rerolling
+    # turns "That guessing mode isn't available yet" into a different, working round.
+
+    async def _pick_song_jacket(self):
+        for _ in range(_ASSET_ATTEMPTS):
+            music = self._random_song()
+            if not music:
+                return None
+            jacket = await _fetch_bytes(music.jacket_url)
+            if jacket:
+                return music, jacket
+        return None
+
+    async def _pick_chart_image(self, has_append: bool, mirror: bool):
+        for _ in range(_ASSET_ATTEMPTS):
+            music = self._random_song(
+                has_append=has_append, needs_master=not has_append
+            )
+            if not music:
+                return None
+            difficulty = "append" if has_append else "master"
+            region = next((r for r in self.bot.pjsk.regions_for_music(music.id) if r in ("en", "jp")), "en")  # type: ignore[union-attr]
+            try:
+                png = await self.bot.sbuga.get_chart_image(music.id, difficulty, region, mirrored=mirror)  # type: ignore[union-attr,arg-type]
+            except SbugaError:
+                continue
+            return music, png, difficulty
+        return None
+
+    async def _pick_card_art(self):
+        for _ in range(_ASSET_ATTEMPTS):
+            card = self._random_card()
+            if not card:
+                return None
+            trained = card.card_rarity_type != "rarity_birthday" and bool(
+                random.randint(0, 1)
+            )
+            if trained and not card.card_url_trained:
+                trained = False  # no trained art; don't claim it in the reveal or hint
+            url = card.card_url_trained if trained else card.card_url_normal
+            art = await _fetch_bytes(url) if url else None
+            if art:
+                return card, trained, art
+        return None
+
+    async def _pick_event_background(self):
+        for _ in range(_ASSET_ATTEMPTS):
+            event = self._random_event()
+            if not event:
+                return None
+            url = event.background_url or event.banner_url
+            background = await _fetch_bytes(url) if url else None
+            if background:
+                return event, background
+        return None
 
     # --- helpers ---
 
@@ -448,18 +514,15 @@ class GuessCog(commands.Cog):
         ):
             guess["guessType"] = "song"
             has_append = mode == "chart_append"
-            music = self._random_song(has_append=has_append)
-            if not music:
-                return None, None
-            guess["answer"] = music.id
-            guess["answerName"] = music.title
 
             if mode == "notes":
-                master = next(
-                    (d for d in music.difficulties if d.difficulty == "master"), None
-                )
-                if not master:
+                # three append-only entries carry no master chart at all
+                music = self._random_song(needs_master=True)
+                if not music:
                     return None, None
+                guess["answer"] = music.id
+                guess["answerName"] = music.title
+                master = next(d for d in music.difficulties if d.difficulty == "master")
                 guess["data"]["notes"] = master.total_note_count
                 jacket = await _fetch_bytes(music.jacket_url)
                 if jacket:
@@ -474,15 +537,13 @@ class GuessCog(commands.Cog):
                 return embed, None
 
             if mode in ("chart", "chart_append"):
-                diff = "append" if has_append else "master"
-                region = next((r for r in self.bot.pjsk.regions_for_music(music.id) if r in ("en", "jp")), "en")  # type: ignore[union-attr]
                 mirror = bool(settings["mirror_charts_by_default"])
-                from services.sbuga import SbugaError
-
-                try:
-                    png = await self.bot.sbuga.get_chart_image(music.id, diff, region, mirrored=mirror)  # type: ignore[union-attr,arg-type]
-                except SbugaError:
+                hit = await self._pick_chart_image(has_append, mirror)
+                if not hit:
                     return None, None
+                music, png, diff = hit
+                guess["answer"] = music.id
+                guess["answerName"] = music.title
                 guess["answer_file_path"] = io.BytesIO(png)
                 guess["data"]["is_chart"] = True
                 cropped = await unblock.to_process_with_timeout(_crop_chart, png)
@@ -496,9 +557,12 @@ class GuessCog(commands.Cog):
                 )
                 return embed, discord.File(cropped, "image.png")
 
-            jacket = await _fetch_bytes(music.jacket_url)
-            if not jacket:
+            hit = await self._pick_song_jacket()
+            if not hit:
                 return None, None
+            music, jacket = hit
+            guess["answer"] = music.id
+            guess["answerName"] = music.title
             guess["answer_file_path"] = io.BytesIO(jacket)
             size, bw = 140, False
             label = "Guess the song from a cropped jacket."
@@ -530,20 +594,12 @@ class GuessCog(commands.Cog):
 
         if mode in ("character", "character_bw"):
             guess["guessType"] = "character"
-            card = self._random_card()
-            if not card:
+            hit = await self._pick_card_art()
+            if not hit:
                 return None, None
+            card, trained, art = hit
             char = self.bot.pjsk.get_character(card.character_id)  # type: ignore[union-attr]
             if not char:
-                return None, None
-            trained = card.card_rarity_type != "rarity_birthday" and bool(
-                random.randint(0, 1)
-            )
-            if trained and not card.card_url_trained:
-                trained = False  # no trained art; don't claim it in the reveal or hint
-            url = card.card_url_trained if trained else card.card_url_normal
-            art = await _fetch_bytes(url) if url else None
-            if not art:
                 return None, None
             guess["answer"] = char.id
             guess["answerName"] = character_display_name(char)
@@ -563,13 +619,10 @@ class GuessCog(commands.Cog):
 
         if mode == "event":
             guess["guessType"] = "event"
-            event = self._random_event()
-            if not event:
+            hit = await self._pick_event_background()
+            if not hit:
                 return None, None
-            url = event.background_url or event.banner_url
-            bg = await _fetch_bytes(url) if url else None
-            if not bg:
-                return None, None
+            event, bg = hit
             guess["answer"] = event.id
             guess["answerName"] = event.name
             guess["answer_file_path"] = io.BytesIO(bg)
