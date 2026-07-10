@@ -18,3 +18,7 @@ data/emojis.json
 synced_commands.data
 
 # Note: data/assets/ (static images/fonts) is intentionally tracked
+
+# sensitive proprietary libraries/executables that should not be publically available
+libraries/nxsk-chart-preview
+libraries/nxsk-chart-preview.exe

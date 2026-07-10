@@ -58,7 +58,7 @@ def _strip_diacritics(text: str) -> str:
 
 
 CACHE_FILE = "cache/search_maps.json"
-CACHE_VERSION = 4  # bump when the cache shape OR the generated keys change
+CACHE_VERSION = 5  # bump when the cache shape OR the generated keys change
 
 
 def _is_invisible(ch: str) -> bool:
@@ -89,6 +89,31 @@ def preprocess(text: str) -> str:
     text = re.sub(STAR_LIKE, " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+_APOSTROPHES = "'’‘`´"
+
+
+def _fold(text: str) -> str:
+    """Drop punctuation so it can't hide a word from the tokenizer. token_set_ratio
+    splits on whitespace only, so "call!!" is one token that shares nothing with the
+    query "call" (80) while "call boy" contains it as a whole token (a flat 100) — the
+    wrong song wins. Folding gives "call!!" the key "call". Apostrophes close up
+    ("don't" -> "dont"); everything else becomes a space.
+
+    Only used for search keys and queries; `preprocess` still defines an alias's
+    stored identity."""
+    chars: list[str] = []
+    for ch in text:
+        if ch in _APOSTROPHES:
+            continue
+        category = unicodedata.category(ch)
+        chars.append(" " if category[0] in ("P", "S") else ch)
+    return re.sub(r"\s+", " ", "".join(chars)).strip()
+
+
+def _with_folded(keys: set[str]) -> set[str]:
+    return keys | {f for f in map(_fold, keys) if f}
 
 
 def _romanize(text: str) -> list[str]:
@@ -125,9 +150,12 @@ def _romanize(text: str) -> list[str]:
 
 def _query_variants(query: str) -> list[str]:
     """The query itself plus its romanizations, so native-script input
-    (jp/kr/zh) matches the romanized keys and vice versa."""
+    (jp/kr/zh) matches the romanized keys and vice versa, plus punctuation-folded
+    forms so a typed "hello/how are you?" reaches the folded key."""
     query_pp = preprocess(query)
-    return list(dict.fromkeys([query_pp, *_romanize(query_pp)]))
+    variants = [query_pp, *_romanize(query_pp)]
+    variants.extend(f for f in map(_fold, list(variants)) if f)
+    return list(dict.fromkeys(variants))
 
 
 LevelKey = tuple[int, int, str]
@@ -150,6 +178,13 @@ _event_auto_map: dict[str, set[int]] = {}
 # larger and a strong generated match would lose to a weaker title match.
 MANUAL_ALIAS_PENALTY = 0.1
 AUTO_KEY_PENALTY = 0.5
+
+# Autocomplete ranking only (_fuzzy), where recall beats precision: token_set_ratio
+# returns a flat 100 for any token subset, so a partial phrase still surfaces the song,
+# blended with the length-aware ratio so extra words cost something. The single-answer
+# matcher (_best_entity) deliberately does NOT use this — see its docstring.
+TOKEN_SET_WEIGHT = 0.8
+DEFAULT_SENSITIVITY = 0.67
 _all_artists: list[str] = []
 _all_captions: list[str] = []
 _min_level: int = 1
@@ -295,10 +330,15 @@ def _compute_search_maps(
         for t in list(dict.fromkeys([*real_titles, *manual_titles])):
             generated_keys.extend(_romanize(t))
 
-        real_pp = {preprocess(k) for k in real_titles if preprocess(k)}
-        manual_pp = {preprocess(k) for k in manual_titles if preprocess(k)} - real_pp
+        # a folded key keeps the tier of whatever it was folded from, so "call" is a
+        # *real title* key for Call!! and beats Call Boy's token-subset match
+        real_pp = _with_folded({preprocess(k) for k in real_titles if preprocess(k)})
+        manual_pp = (
+            _with_folded({preprocess(k) for k in manual_titles if preprocess(k)})
+            - real_pp
+        )
         auto_pp = (
-            {preprocess(k) for k in generated_keys if preprocess(k)}
+            _with_folded({preprocess(k) for k in generated_keys if preprocess(k)})
             - real_pp
             - manual_pp
         )
@@ -435,12 +475,15 @@ def _compute_event_maps(
             if source:
                 generated.extend(_romanize(source))
 
-        real_pp = {preprocess(k) for k in real if preprocess(k)}
-        manual_pp = {
-            preprocess(k) for k in event.name_variants if preprocess(k)
-        } - real_pp
+        real_pp = _with_folded({preprocess(k) for k in real if preprocess(k)})
+        manual_pp = (
+            _with_folded({preprocess(k) for k in event.name_variants if preprocess(k)})
+            - real_pp
+        )
         auto_pp = (
-            {preprocess(k) for k in generated if preprocess(k)} - real_pp - manual_pp
+            _with_folded({preprocess(k) for k in generated if preprocess(k)})
+            - real_pp
+            - manual_pp
         )
 
         for pk in real_pp | manual_pp | auto_pp:
@@ -462,12 +505,18 @@ async def build_event_search_map(events: list[Event]) -> None:
     print(f"[Search] Event maps built: {len(_event_map)} keys")
 
 
+def _similarity(query: str, key: str) -> float:
+    return TOKEN_SET_WEIGHT * fuzz.token_set_ratio(query, key) + (
+        1 - TOKEN_SET_WEIGHT
+    ) * fuzz.ratio(query, key)
+
+
 def _score_key(variants: list[str], key: str) -> tuple[float, int]:
     """Best (similarity, edit_distance) of any query variant against `key`."""
     best_sim: float = -1.0
     best_dist = 10**9
     for q in variants:
-        similarity: float = fuzz.token_set_ratio(q, key)
+        similarity: float = _similarity(q, key)
         edit_distance = Levenshtein.distance(q, key)
         if edit_distance > 5:
             excess = abs(len(key) - len(q))
@@ -542,25 +591,44 @@ def _best_entity(
     query: str,
     sensitivity: float,
 ) -> tuple[int, str] | None:
-    """Single best (id, matched key): token_set_ratio with an edit-distance penalty,
-    plus a slight penalty when the matched key is only a hand-written *alias* for that
-    id, and a slightly larger one when it's merely *generated* — so on a tie the id the
-    key really titles wins, then the one that curates it as an alias.
-    Ties are otherwise broken by edit distance, then lowest id."""
+    """Single best (id, matched key), the way the old bot did it: an exact key wins
+    outright, and only if nothing matches exactly does a fuzzy pass run.
+
+    The fuzzy pass scores on `fuzz.ratio` alone, not token_set_ratio. token_set_ratio
+    returns a flat 100 for any token subset, so it can't tell "world" apart from "the
+    world" (100) and "a word" (72.7) — it prefers the longer key. ratio is length-aware,
+    so the closer key wins. That costs partial-phrase recall ("hatsune miku" no longer
+    reaches the full title), which is why exact-first matters: every title, alias,
+    romanisation and punctuation-folded form is already a key, so the fuzzy pass only
+    ever sees typos and genuine near-misses.
+
+    Ties break on the tier of the key (real title > hand-written alias > generated),
+    then edit distance, then lowest id."""
     if not scope or not query.strip():
         return None
-    query_pp = preprocess(query)
     variants = _query_variants(query)
+
+    # Exact-first. Variants are ordered typed-form, romanisations, folded forms, so the
+    # key the user actually typed is reported back rather than an equivalent spelling.
+    for variant in variants:
+        ids = scope.get(variant)
+        if ids:
+            best_id = min(
+                sorted(ids),
+                key=lambda i: (_key_penalty(variant, i, alias_map, auto_map), i),
+            )
+            return best_id, variant
+
     sensitivity_100 = sensitivity * 100
-    best_id: int | None = None
+    best_id_opt: int | None = None
     best_key: str = ""
-    best: tuple[float, bool, int] | None = None
+    best: tuple[float, int] | None = None
 
     for key, ids in scope.items():
         similarity: float = -1.0
         edit_distance = 10**9
         for q in variants:
-            sim: float = fuzz.token_set_ratio(q, key)
+            sim: float = fuzz.ratio(q, key)
             dist = Levenshtein.distance(q, key)
             if dist > 5:
                 sim -= (dist - 5) * 5
@@ -569,18 +637,14 @@ def _best_entity(
                 edit_distance = dist
         if similarity < sensitivity_100:
             continue
-        # Several keys can tie at 100/0 (a title, its romanisation, its loanword
-        # spelling). Prefer the one the user actually typed, so the reported key is
-        # meaningful — otherwise "ロキ" could report having matched "loci".
-        exact = key == query_pp
         for i in sorted(ids):
             score = similarity - _key_penalty(key, i, alias_map, auto_map)
-            candidate = (score, exact, -edit_distance)
+            candidate = (score, -edit_distance)
             if best is None or candidate > best:
                 best = candidate
-                best_id = i
+                best_id_opt = i
                 best_key = key
-    return None if best_id is None else (best_id, best_key)
+    return None if best_id_opt is None else (best_id_opt, best_key)
 
 
 def song_keys(music_id: int) -> list[str]:
@@ -589,19 +653,23 @@ def song_keys(music_id: int) -> list[str]:
     return sorted(k for k, ids in _playlist_map.items() if music_id in ids)
 
 
-def best_song_match_key(query: str, sensitivity: float = 0.6) -> tuple[int, str] | None:
+def best_song_match_key(
+    query: str, sensitivity: float = DEFAULT_SENSITIVITY
+) -> tuple[int, str] | None:
     """The matched song id along with the key (title or alias) that matched it."""
     return _best_entity(
         _playlist_map, _playlist_alias_map, _playlist_auto_map, query, sensitivity
     )
 
 
-def best_song_match(query: str, sensitivity: float = 0.6) -> int | None:
+def best_song_match(query: str, sensitivity: float = DEFAULT_SENSITIVITY) -> int | None:
     hit = best_song_match_key(query, sensitivity)
     return hit[0] if hit else None
 
 
-def best_event_match(query: str, sensitivity: float = 0.6) -> int | None:
+def best_event_match(
+    query: str, sensitivity: float = DEFAULT_SENSITIVITY
+) -> int | None:
     hit = _best_entity(
         _event_map, _event_alias_map, _event_auto_map, query, sensitivity
     )

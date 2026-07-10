@@ -11,13 +11,8 @@ from discord.ext import commands
 from data.search import preprocess
 from helpers import converters, embeds
 from helpers.autocompletes import autocompletes
-from helpers.config_loader import get_config
 from helpers.emojis import emojis
 from services.sbuga import SbugaError, SbugaNotFound
-
-# /alias is a support-server-only tool (`/song aliases` is the public read).
-# Registering it as a guild command keeps it out of every other server's picker.
-_SUPPORT_GUILD_ID: int | None = get_config()["discord"].get("support_id") or None
 
 if TYPE_CHECKING:
     from main import SbugaBot
@@ -35,18 +30,26 @@ class InfoCog(commands.Cog):
         while log and log[0][1] < cutoff:
             log.popleft()
 
-    def _in_support_server(self, interaction: discord.Interaction) -> bool:
-        """Alias editing is confined to the support server — the manager roles only
-        exist there, and the /alias group is installable anywhere."""
-        support_id = self.bot.config["discord"].get("support_id")
-        return bool(support_id) and interaction.guild_id == support_id
-
-    def _is_alias_mod(self, user: discord.abc.User | discord.Member) -> bool:
-        if user.id in (self.bot.owner_ids or set()):
+    async def _is_alias_mod(self, user_id: int) -> bool:
+        """The manager roles only exist in the support server, so authority is always
+        resolved there — never against the roles of whatever guild the caller ran this
+        in (which may be none at all, in a DM or a user install)."""
+        if user_id in (self.bot.owner_ids or set()):
             return True
         role_ids = set(self.bot.config["discord"].get("alias_manager_role_ids", []))
-        user_roles = {r.id for r in getattr(user, "roles", [])}
-        return bool(role_ids & user_roles)
+        support_id = self.bot.config["discord"].get("support_id")
+        if not role_ids or not support_id:
+            return False
+        guild = self.bot.get_guild(support_id)
+        if not guild:
+            return False
+        member = guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(user_id)
+            except discord.HTTPException:
+                return False
+        return bool(role_ids & {r.id for r in member.roles})
 
     def _alias_error_embed(self, error: SbugaError, alias: str) -> discord.Embed:
         """Aliases are unique across every song, so name the one already holding it."""
@@ -65,23 +68,15 @@ class InfoCog(commands.Cog):
             )
         return embeds.error_embed(f"Couldn't add alias: {error.detail or error.status}")
 
-    async def _deny_alias_edit(self, interaction: discord.Interaction) -> bool:
-        """Reply and return True if this caller may not edit aliases here."""
-        if not self._in_support_server(interaction):
-            await interaction.response.send_message(
-                embed=embeds.error_embed(
-                    "Alias commands can only be used in the support server."
-                ),
-                ephemeral=True,
-            )
-            return True
-        if not self._is_alias_mod(interaction.user):
-            await interaction.response.send_message(
-                embed=embeds.error_embed("You're not authorized to manage aliases."),
-                ephemeral=True,
-            )
-            return True
-        return False
+    async def _deny_alias(self, interaction: discord.Interaction) -> bool:
+        """Reply and return True if this caller may not use the alias commands."""
+        if await self._is_alias_mod(interaction.user.id):
+            return False
+        await interaction.response.send_message(
+            embed=embeds.error_embed("You're not authorized to manage aliases."),
+            ephemeral=True,
+        )
+        return True
 
     @commands.Cog.listener()
     async def on_app_command_completion(
@@ -328,14 +323,19 @@ class InfoCog(commands.Cog):
     # elsewhere. Not user-installable and not usable in DMs.
     alias = app_commands.Group(
         name="alias",
-        description="Song aliases (support server only).",
-        guild_ids=[_SUPPORT_GUILD_ID] if _SUPPORT_GUILD_ID else None,
+        description="Song aliases (alias managers only).",
+        allowed_installs=app_commands.AppInstallationType(guild=True, user=True),
+        allowed_contexts=app_commands.AppCommandContext(
+            guild=True, dm_channel=True, private_channel=True
+        ),
     )
 
-    @alias.command(name="list", description="View a song's aliases.")
+    @alias.command(name="list", description="Authorized only; view a song's aliases.")
     @app_commands.autocomplete(song=autocompletes.pjsk_song)
     @app_commands.describe(song="Song name or ID.")
     async def list_aliases(self, interaction: discord.Interaction, song: str) -> None:
+        if await self._deny_alias(interaction):
+            return
         await interaction.response.defer(thinking=True)
         music = converters.match_song(self.bot.pjsk, song)  # type: ignore[arg-type]
         if not music:
@@ -369,7 +369,7 @@ class InfoCog(commands.Cog):
     async def add_alias(
         self, interaction: discord.Interaction, song: str, alias: str
     ) -> None:
-        if await self._deny_alias_edit(interaction):
+        if await self._deny_alias(interaction):
             return
         await interaction.response.defer(thinking=True)
         music = converters.match_song(self.bot.pjsk, song)  # type: ignore[arg-type]
@@ -403,7 +403,7 @@ class InfoCog(commands.Cog):
     async def remove_alias(
         self, interaction: discord.Interaction, song: str, alias: str
     ) -> None:
-        if await self._deny_alias_edit(interaction):
+        if await self._deny_alias(interaction):
             return
         await interaction.response.defer(thinking=True)
         music = converters.match_song(self.bot.pjsk, song)  # type: ignore[arg-type]

@@ -105,6 +105,28 @@ class DevCog(commands.Cog):
             )
 
     @commands.command()
+    async def update_constants(self, ctx: commands.Context) -> None:
+        await ctx.reply("Re-downloading chart constants...")
+        try:
+            assert self.bot.constants
+            await self.bot.constants.update()
+            constants = self.bot.constants
+            await ctx.reply(
+                embed=embeds.success_embed(
+                    f"**39s:** `{len(constants.constants)}` charts\n"
+                    f"**Overrides:** `{len(constants.constants_override)}` charts",
+                    title="Constants Updated",
+                )
+            )
+        except Exception as e:
+            await ctx.reply(
+                embed=embeds.error_embed(
+                    f"Failed to update constants.\n```{e}```",
+                    title="Update Failed",
+                )
+            )
+
+    @commands.command()
     async def refresh(self, ctx: commands.Context) -> None:
         await ctx.reply("Refreshing PJSK data + constants from sbuga...")
         try:

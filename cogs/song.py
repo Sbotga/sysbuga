@@ -456,21 +456,62 @@ class SongInfo(commands.Cog):
         )
         await interaction.followup.send(embed=embed)
 
+    def _chart_constant(self, music_id: int, difficulty: str) -> float | None:
+        """The chart constant, or None when the chart has no rating yet. Uses the same
+        override chain as everything else (spreadsheet 2, then the 39s sheet) and never
+        falls back to the play level."""
+        try:
+            value = self.bot.constants.get_sync(  # type: ignore[union-attr]
+                music_id, difficulty, ap=True, error_on_not_found=True
+            )
+        except IndexError:
+            return None
+        return float(value) if isinstance(value, (int, float)) else None
+
     @song.command(name="difficulty", description="Find all songs of a level.")
-    @app_commands.describe(level="Level to search (1-39).")
-    async def difficulty(self, interaction: discord.Interaction, level: int) -> None:
+    @app_commands.describe(
+        level="Level to search (1-39).",
+        by_constants="Sort each difficulty by chart constant, hardest first, and show it.",
+    )
+    async def difficulty(
+        self, interaction: discord.Interaction, level: int, by_constants: bool = False
+    ) -> None:
         await interaction.response.defer(thinking=True)
         if not 0 < level < 40:
             await interaction.followup.send(
                 embed=embeds.error_embed("Level must be between 1 and 39.")
             )
             return
-        found: list[tuple[Music, str]] = []
+        found: list[tuple[Music, str, float | None]] = []
         for music in self.bot.pjsk.musics():  # type: ignore[union-attr]
             for d in music.difficulties:
                 if d.play_level == level:
-                    found.append((music, d.difficulty))
-        found.sort(key=lambda x: (DIFFICULTY_ORDER.index(x[1]), x[0].title.lower()))
+                    constant = (
+                        self._chart_constant(music.id, d.difficulty)
+                        if by_constants
+                        else None
+                    )
+                    found.append((music, d.difficulty, constant))
+
+        if by_constants:
+            # within a difficulty: highest constant first, unrated charts last
+            found.sort(
+                key=lambda x: (
+                    DIFFICULTY_ORDER.index(x[1]),
+                    x[2] is None,
+                    -(x[2] or 0.0),
+                    x[0].title.lower(),
+                )
+            )
+        else:
+            found.sort(key=lambda x: (DIFFICULTY_ORDER.index(x[1]), x[0].title.lower()))
+
+        def line(music: Music, diff: str, constant: float | None) -> str:
+            label = f"**{diff.capitalize()} {emojis.difficulty_colors[diff]}**"
+            if not by_constants:
+                return f"{label} - {music.title}"
+            shown = f"{constant:.1f}" if constant is not None else "??.?"
+            return f"{label} {level} ({shown}) - {music.title}"
 
         per_page = 25
         total_pages = max(1, math.ceil(len(found) / per_page))
@@ -481,10 +522,7 @@ class SongInfo(commands.Cog):
                 title=f"Level {level} Songs", color=discord.Color.blue()
             )
             embed.description = (
-                "\n".join(
-                    f"**{diff.capitalize()} {emojis.difficulty_colors[diff]}** - {m.title}"
-                    for m, diff in found[start : start + per_page]
-                )
+                "\n".join(line(*row) for row in found[start : start + per_page])
                 or "No songs found."
             ) + f"\n\n-# Page {page}/{total_pages}"
             return embed
