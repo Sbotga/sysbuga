@@ -1,31 +1,46 @@
 """Render Sonolus charts to MP4 via the nxsk-chart-preview binary.
 
-Run once in `--export-cli` server mode (GL context + assets load once): it prints READY,
-then renders one request per stdin line and replies "OK <path>" / "ERR <msg>". Needs an
-OpenGL context, so on a headless host it's wrapped in `xvfb-run`.
+Each nxsk process runs in `--export-cli` server mode (GL context + assets load once): it
+prints READY, then renders one request per stdin line and replies "OK <path>" / "ERR <msg>".
+A bounded pool of these sessions lets renders run in parallel — the cache filler renders a
+chart clip and its answer clip at once, and on-the-fly rounds get their own session.
+
+Sessions are memory-heavy (each is a full GL context + assets), so the pool keeps only what's
+useful: a maintenance loop holds `warm_source()` idle sessions ready (the caller sets this to
+the number of empty cache pools, so a session stays warm exactly when on-the-fly renders are
+likely), and trims the rest once they've sat idle past a grace window. MAX_SESSIONS caps total
+live sessions. Needs an OpenGL context, so on a headless host each is wrapped in `xvfb-run`.
 """
 
 import asyncio
 import os
 import shutil
 import signal
+import time
 from pathlib import Path
+from typing import Callable
 
 _LIBRARIES = Path(__file__).resolve().parent.parent / "libraries"
 _EXECUTABLE = _LIBRARIES / (
     "nxsk-chart-preview.exe" if os.name == "nt" else "nxsk-chart-preview"
 )
 
-_SERVER_START_TIMEOUT = 90.0  # one-time gl + asset load
+_SERVER_START_TIMEOUT = 90.0  # one-time gl + asset load, per session
 
-# one server; renders serialize through it (parallel software-gl renders just fight for cores)
-_lock = asyncio.Lock()
-_process: "asyncio.subprocess.Process | None" = None
+# max total live sessions (active + idle). Each is a full GL context + assets, so this is the
+# memory ceiling — lower it on a tight box.
+MAX_SESSIONS = 4
+_IDLE_GRACE = (
+    20.0  # a just-released session stays warm this long before it can be trimmed
+)
+_MAINTAIN_INTERVAL = 3.0
 
-
-def available() -> bool:
-    """Whether the renderer binary is present. Callers can fall back when it isn't."""
-    return _EXECUTABLE.is_file()
+# a permit is held for a session's whole life (active or idle), so this bounds total sessions
+_slots = asyncio.Semaphore(MAX_SESSIONS)
+_idle: "list[tuple[Session, float]]" = []  # (session, idle_since monotonic)
+_pool_lock = asyncio.Lock()
+_warm_source: "Callable[[], int] | None" = None  # how many idle sessions to keep ready
+_maintain_task: "asyncio.Task | None" = None
 
 
 class ChartPreviewError(RuntimeError):
@@ -33,6 +48,36 @@ class ChartPreviewError(RuntimeError):
         super().__init__(f"nxsk-chart-preview: {message}")
         self.returncode = returncode
         self.message = message
+
+
+class Session:
+    def __init__(self, process: "asyncio.subprocess.Process") -> None:
+        self.process = process
+
+    @property
+    def alive(self) -> bool:
+        return self.process.returncode is None
+
+
+def available() -> bool:
+    """Whether the renderer binary is present. Callers can fall back when it isn't."""
+    return _EXECUTABLE.is_file()
+
+
+def set_warm_source(fn: "Callable[[], int] | None") -> None:
+    """Register a function returning how many idle sessions to keep warm (clamped to
+    MAX_SESSIONS). The maintenance loop reads it each tick."""
+    global _warm_source
+    _warm_source = fn
+
+
+def _warm_target() -> int:
+    if _warm_source is None:
+        return 0
+    try:
+        return max(0, min(_warm_source(), MAX_SESSIONS))
+    except Exception:
+        return 0
 
 
 def _headless_argv(argv: list[str]) -> list[str]:
@@ -47,10 +92,11 @@ def _headless_argv(argv: list[str]) -> list[str]:
     return [xvfb_run, "-a", *argv]
 
 
-async def _kill_tree(process: "asyncio.subprocess.Process") -> None:
+async def _kill(session: "Session") -> None:
     """kill the whole process group: on linux the child is `xvfb-run`, which forks xvfb +
     the renderer, so killing just it orphans them. on windows the child is the renderer.
     """
+    process = session.process
     try:
         if os.name == "nt":
             process.kill()
@@ -64,43 +110,100 @@ async def _kill_tree(process: "asyncio.subprocess.Process") -> None:
         pass
 
 
-async def _stop_locked() -> None:
-    """Tear down the current server. Caller must hold `_lock`."""
-    global _process
-    if _process is not None:
-        await _kill_tree(_process)
-        _process = None
-
-
-async def _ensure_server() -> "asyncio.subprocess.Process":
-    """The live server, (re)starting it if it isn't running. Caller must hold `_lock`."""
-    global _process
-    if _process is not None and _process.returncode is None:
-        return _process
+async def _spawn() -> "Session":
+    """Start a session and wait for READY. Caller must already hold a slot permit."""
     if not _EXECUTABLE.is_file():
         raise ChartPreviewError(-1, f"renderer not found at {_EXECUTABLE}")
-
-    _process = await asyncio.create_subprocess_exec(
+    process = await asyncio.create_subprocess_exec(
         *_headless_argv([str(_EXECUTABLE), "--export-cli"]),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,  # per-frame progress noise
         start_new_session=os.name != "nt",
     )
-    assert _process.stdout is not None
+    session = Session(process)
+    assert process.stdout is not None
     try:
         while True:
             raw = await asyncio.wait_for(
-                _process.stdout.readline(), _SERVER_START_TIMEOUT
+                process.stdout.readline(), _SERVER_START_TIMEOUT
             )
             if not raw:
                 raise ChartPreviewError(-1, "renderer exited before READY")
             if raw.decode("utf-8", "replace").strip() == "READY":
                 break
     except (asyncio.TimeoutError, ChartPreviewError):
-        await _stop_locked()
+        await _kill(session)
         raise ChartPreviewError(-1, "renderer failed to start") from None
-    return _process
+    return session
+
+
+async def _acquire() -> "Session":
+    """A ready session for one render — reused from idle or freshly spawned (bounded by
+    MAX_SESSIONS). A reused session keeps its permit; a new one takes a fresh permit."""
+    async with _pool_lock:
+        if _idle:
+            return _idle.pop()[0]
+    await _slots.acquire()
+    try:
+        async with _pool_lock:
+            if _idle:  # one was released while we waited for a permit
+                _slots.release()
+                return _idle.pop()[0]
+        return await _spawn()
+    except BaseException:
+        _slots.release()
+        raise
+
+
+async def _release(session: "Session", healthy: bool) -> None:
+    if healthy and session.alive:
+        async with _pool_lock:
+            _idle.append((session, time.monotonic()))  # keeps its permit while idle
+    else:
+        await _kill(session)
+        _slots.release()
+
+
+async def _warm_one() -> None:
+    """Spawn a session straight into the idle pool. Only call when a permit is free."""
+    await _slots.acquire()
+    try:
+        session = await _spawn()
+    except BaseException:
+        _slots.release()
+        raise
+    async with _pool_lock:
+        _idle.append((session, time.monotonic()))
+
+
+async def _maintain() -> None:
+    while True:
+        target = _warm_target()
+        now = time.monotonic()
+        to_kill: list[Session] = []
+        async with _pool_lock:
+            # keep the most-recently-idle up to target, plus anything still within the grace
+            # window (a filler session cycling between renders), and trim the rest
+            _idle.sort(key=lambda item: item[1], reverse=True)
+            kept: list[tuple[Session, float]] = []
+            for session, since in _idle:
+                if len(kept) < target or (now - since) < _IDLE_GRACE:
+                    kept.append((session, since))
+                else:
+                    to_kill.append(session)
+            _idle[:] = kept  # in-place so `_idle` stays the module global
+            deficit = target - len(_idle)
+        for session in to_kill:
+            await _kill(session)
+            _slots.release()
+        # top up toward the target, one per tick, only if a permit is free (don't block)
+        if deficit > 0 and not _slots.locked():
+            try:
+                await _warm_one()
+            except Exception:
+                pass
+        await asyncio.sleep(_MAINTAIN_INTERVAL)
 
 
 def _quote(token: str) -> str:
@@ -136,63 +239,72 @@ async def render(
     tokens += ["--crf", str(crf), "--export", str(output)]
     request = (" ".join(_quote(t) for t in tokens) + "\n").encode("utf-8")
 
-    async with _lock:
-        process = await _ensure_server()
-        assert process.stdin is not None and process.stdout is not None
-        try:
-            process.stdin.write(request)
-            await process.stdin.drain()
-            while True:
-                raw = await asyncio.wait_for(process.stdout.readline(), timeout)
-                if not raw:
-                    await _stop_locked()  # server died mid-request
-                    raise ChartPreviewError(-1, "renderer closed unexpectedly")
-                line = raw.decode("utf-8", "replace").rstrip("\r\n")
-                if line.startswith("OK "):
-                    return output
-                if line.startswith("ERR "):
-                    raise ChartPreviewError(1, line[4:])  # in sync; don't restart
-        except (
-            asyncio.TimeoutError,
-            asyncio.CancelledError,
-            BrokenPipeError,
-            ConnectionResetError,
-        ) as exc:
-            # mid-render or broken pipe: restart, or the next request reads this one's late reply
-            await _stop_locked()
-            if isinstance(exc, asyncio.TimeoutError):
-                raise ChartPreviewError(
-                    -1, f"render timed out after {timeout}s"
-                ) from None
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            raise ChartPreviewError(-1, "renderer pipe broke") from None
+    session = await _acquire()
+    process = session.process
+    assert process.stdin is not None and process.stdout is not None
+    healthy = False
+    try:
+        process.stdin.write(request)
+        await process.stdin.drain()
+        while True:
+            raw = await asyncio.wait_for(process.stdout.readline(), timeout)
+            if not raw:
+                raise ChartPreviewError(-1, "renderer closed unexpectedly")
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            if line.startswith("OK "):
+                healthy = True  # in sync; keep the session
+                return output
+            if line.startswith("ERR "):
+                healthy = True  # clean reply, still in sync
+                raise ChartPreviewError(1, line[4:])
+    except (
+        asyncio.TimeoutError,
+        asyncio.CancelledError,
+        BrokenPipeError,
+        ConnectionResetError,
+    ) as exc:
+        # mid-render or broken pipe: the session is desynced, so it's dropped (healthy stays
+        # False), or the next request on it would read this one's late reply
+        if isinstance(exc, asyncio.TimeoutError):
+            raise ChartPreviewError(-1, f"render timed out after {timeout}s") from None
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        raise ChartPreviewError(-1, "renderer pipe broke") from None
+    finally:
+        await _release(session, healthy)
 
 
 async def start() -> None:
-    """Warm the server up front so the first render doesn't pay the GL + asset load.
-    Best-effort: a failure here just means the first real render (re)tries, then falls back.
-    """
+    """Start the maintenance loop (which warms sessions per the warm_source). Best-effort:
+    if the binary is absent it does nothing and renders fall back."""
+    global _maintain_task
     if not available():
         return
-    try:
-        async with _lock:
-            await _ensure_server()
-    except Exception:
-        pass
+    if _maintain_task is None or _maintain_task.done():
+        _maintain_task = asyncio.create_task(_maintain())
 
 
 async def stop() -> None:
-    """Shut the server down (graceful `quit`, then kill). Safe to call when none is running."""
-    async with _lock:
-        global _process
-        if _process is None:
-            return
-        if _process.returncode is None and _process.stdin is not None:
+    """Stop maintenance and shut every idle session down. In-flight renders drop their own
+    sessions when cancelled, so this only sweeps the idle pool."""
+    global _maintain_task
+    if _maintain_task is not None:
+        _maintain_task.cancel()
+        try:
+            await _maintain_task
+        except asyncio.CancelledError:
+            pass
+        _maintain_task = None
+    async with _pool_lock:
+        sessions = [s for s, _ in _idle]
+        _idle.clear()
+    for session in sessions:
+        process = session.process
+        if session.alive and process.stdin is not None:
             try:
-                _process.stdin.write(b"quit\n")
-                await _process.stdin.drain()
-                await asyncio.wait_for(_process.wait(), 5.0)
+                process.stdin.write(b"quit\n")
+                await process.stdin.drain()
+                await asyncio.wait_for(process.wait(), 5.0)
             except (asyncio.TimeoutError, BrokenPipeError, ConnectionResetError):
-                await _kill_tree(_process)
-        _process = None
+                await _kill(session)
+        _slots.release()  # idle sessions hold a permit for life; free it now

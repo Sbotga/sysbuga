@@ -202,11 +202,9 @@ async def _render_one(gtype: str) -> bool:
     )
     if window is None:
         return False
-    chart_mp4 = await chart_clip.render_leveldata(
-        window, mirror=False, height=chart_clip.CACHED_HEIGHT, fps=chart_clip.CACHED_FPS
-    )
 
-    # a cache entry must have the reveal video too; skip the song if we can't build it
+    # an entry needs both the chart clip and the reveal video; skip the song if the audio
+    # or jacket isn't available (the reveal is mandatory for a cached entry)
     bgm_url = _pick_bgm_url(music)
     if not bgm_url or not music.jacket_url:
         return False
@@ -214,13 +212,23 @@ async def _render_one(gtype: str) -> bool:
     jacket = await _fetch_bytes(_png_jacket_url(music.jacket_url))
     if not bgm or not jacket:
         return False
+
+    # render the two clips at once (two nxsk sessions) — they share the same cut window
     try:
-        answer_mp4 = await chart_clip.render_answer_video(
-            window,
-            jacket,
-            bgm,
-            height=chart_clip.CACHED_HEIGHT,
-            fps=chart_clip.CACHED_FPS,
+        chart_mp4, answer_mp4 = await asyncio.gather(
+            chart_clip.render_leveldata(
+                window,
+                mirror=False,
+                height=chart_clip.CACHED_HEIGHT,
+                fps=chart_clip.CACHED_FPS,
+            ),
+            chart_clip.render_answer_video(
+                window,
+                jacket,
+                bgm,
+                height=chart_clip.CACHED_HEIGHT,
+                fps=chart_clip.CACHED_FPS,
+            ),
         )
     except chart_clip.ChartClipError:
         return False
@@ -253,10 +261,16 @@ async def _worker() -> None:
             await asyncio.sleep(_POLL_SECONDS)  # missing SUS / renderer down: back off
 
 
+def _empty_pools() -> int:
+    return sum(1 for t in TYPES if count(t) == 0)
+
+
 def start(pjsk: "PJSKData") -> None:
     """Begin filling the cache in the background. Only one process should do this."""
     global _pjsk, _running, _task
     _pjsk = pjsk
+    # keep a session warm per empty pool, so an on-the-fly render for a drained type is ready
+    chart_preview.set_warm_source(_empty_pools)
     if _task and not _task.done():
         return
     _running = True
@@ -266,6 +280,7 @@ def start(pjsk: "PJSKData") -> None:
 async def stop() -> None:
     global _running, _task
     _running = False
+    chart_preview.set_warm_source(None)
     if _task:
         _task.cancel()
         try:

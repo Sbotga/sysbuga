@@ -78,7 +78,7 @@ def cut_window(sus_text: str) -> "Window | None":
 
 
 # cached (pre-rendered) clips get the nicer quality; the on-the-fly fallback is smaller/faster
-CACHED_HEIGHT, CACHED_FPS = 576, 48
+CACHED_HEIGHT, CACHED_FPS = 576, 30
 LIVE_HEIGHT, LIVE_FPS = 360, 24
 
 # how many pre-rendered clips to keep on disk per chart-guess type
