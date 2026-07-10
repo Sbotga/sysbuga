@@ -90,7 +90,7 @@ def _settings(starting_combo: int, mirror: bool, height: int, fps: int) -> str:
         "exportHeight": height,
         "exportFps": fps,
         "exportPreset": 0,  # veryfast
-        "exportEncThreads": 2,
+        "exportEncThreads": 1,
         "exportAudioKbps": 128,
         "pvShowStart": False,
         "pvDrawScoreHud": False,
