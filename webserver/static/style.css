@@ -166,8 +166,9 @@ select:disabled, input:disabled, button:disabled { opacity: 0.5; cursor: not-all
 .prompt { font-size: 1.02rem; min-height: 1em; }
 
 .round-image-wrap { width: 100%; display: flex; justify-content: center; }
-#round-image, #spectate-image { max-width: 100%; max-height: 52vh; object-fit: contain; border-radius: 10px; image-rendering: pixelated; }
-#round-image[hidden], #spectate-image[hidden] { display: none; }
+#round-image, #spectate-image, #round-video, #spectate-video { max-width: 100%; max-height: 52vh; object-fit: contain; border-radius: 10px; }
+#round-image, #spectate-image { image-rendering: pixelated; }
+#round-image[hidden], #spectate-image[hidden], #round-video[hidden], #spectate-video[hidden] { display: none; }
 
 #guess-form { display: flex; gap: 8px; width: 100%; }
 #guess-form input { flex: 1; }
@@ -277,7 +278,7 @@ select:disabled, input:disabled, button:disabled { opacity: 0.5; cursor: not-all
   .round-body { flex-direction: column; gap: 10px; }
   .round-menu { order: 0; flex: 0 0 auto; overflow: visible; }
   .log-panel { order: 0; flex: 1; }
-  #round-image, #spectate-image { max-height: 38vh; }
+  #round-image, #spectate-image, #round-video, #spectate-video { max-height: 38vh; }
 }
 
 @media (max-width: 420px) {

@@ -162,6 +162,19 @@ async def render(
             raise ChartPreviewError(-1, "renderer pipe broke") from None
 
 
+async def start() -> None:
+    """Warm the server up front so the first render doesn't pay the GL + asset load.
+    Best-effort: a failure here just means the first real render (re)tries, then falls back.
+    """
+    if not available():
+        return
+    try:
+        async with _lock:
+            await _ensure_server()
+    except Exception:
+        pass
+
+
 async def stop() -> None:
     """Shut the server down (graceful `quit`, then kill). Safe to call when none is running."""
     async with _lock:

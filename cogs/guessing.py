@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import random
 import time
@@ -83,6 +84,10 @@ class GuessCog(commands.Cog):
         self.bot.cache.guess_channels = {}
         chart_clip.cleanup_stale()
         self.check_guess_task.start()
+
+    async def cog_load(self) -> None:
+        # warm the render server in the background (don't block startup on a slow binary)
+        asyncio.create_task(chart_preview.start())
 
     async def cog_unload(self) -> None:
         self.check_guess_task.cancel()
@@ -174,10 +179,12 @@ class GuessCog(commands.Cog):
             try:
                 clip = await chart_clip.render_clip(sus_text, mirror=mirror)
             except chart_clip.ChartClipError as exc:
+                # a render failure is a renderer problem, not a chart one — bail so the
+                # caller falls back to the cropped image instead of retrying identically
                 self.bot.warn(
                     f"chart clip render failed ({music.id} {difficulty}): {exc}"
                 )
-                continue
+                return None
             if not clip:
                 continue
             # full chart for the reveal (best-effort)
@@ -584,44 +591,46 @@ class GuessCog(commands.Cog):
                     "\n\n**Chart is mirrored! (your setting)**" if mirror else ""
                 )
 
-                if not chart_preview.available():
-                    # no renderer installed: fall back to the old cropped chart image
-                    hit = await self._pick_chart_image(has_append, mirror)
-                    if not hit:
-                        return None, None
-                    music, png, diff = hit
+                clip_hit = (
+                    await self._pick_chart_clip(has_append, mirror)
+                    if chart_preview.available()
+                    else None
+                )
+                if clip_hit:
+                    music, clip, png, diff = clip_hit
                     guess["answer"] = music.id
                     guess["answerName"] = music.title
-                    guess["answer_file_path"] = io.BytesIO(png)
-                    cropped = await unblock.to_process_with_timeout(_crop_chart, png)
+                    if png:  # reveal (/guess end) still shows the full chart
+                        guess["answer_file_path"] = io.BytesIO(png)
                     embed = embeds.embed(
                         title="Guess The Chart", color=discord.Color.dark_gold()
                     )
-                    embed.set_image(url="attachment://image.png")
                     embed.description = (
-                        f"Guess the song from a cropped {diff} chart.\n"
+                        f"Guess the song from a ~10 second {diff} chart clip.\n"
                         f"Use `{GUESS_PREFIX}your guess` to guess. You have {secs} seconds."
                         + mirror_note
                     )
-                    return embed, discord.File(cropped, "image.png")
+                    return embed, discord.File(io.BytesIO(clip), "chart.mp4")
 
-                hit = await self._pick_chart_clip(has_append, mirror)
+                # renderer missing/broken or no clip available: cropped chart image
+                hit = await self._pick_chart_image(has_append, mirror)
                 if not hit:
                     return None, None
-                music, clip, png, diff = hit
+                music, png, diff = hit
                 guess["answer"] = music.id
                 guess["answerName"] = music.title
-                if png:  # reveal (/guess end) still shows the full chart
-                    guess["answer_file_path"] = io.BytesIO(png)
+                guess["answer_file_path"] = io.BytesIO(png)
+                cropped = await unblock.to_process_with_timeout(_crop_chart, png)
                 embed = embeds.embed(
                     title="Guess The Chart", color=discord.Color.dark_gold()
                 )
+                embed.set_image(url="attachment://image.png")
                 embed.description = (
-                    f"Guess the song from a ~10 second {diff} chart clip.\n"
+                    f"Guess the song from a cropped {diff} chart.\n"
                     f"Use `{GUESS_PREFIX}your guess` to guess. You have {secs} seconds."
                     + mirror_note
                 )
-                return embed, discord.File(io.BytesIO(clip), "chart.mp4")
+                return embed, discord.File(cropped, "image.png")
 
             hit = await self._pick_song_jacket()
             if not hit:

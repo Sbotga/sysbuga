@@ -31,6 +31,7 @@ from data.pjsk import character_display_name
 from data.search import preprocess
 from data.song_equivalents import songs_equivalent
 from helpers import converters, unblock
+from services import chart_clip, chart_preview
 from webserver import redis_state, spectate
 
 if TYPE_CHECKING:
@@ -125,6 +126,7 @@ async def _build_round(
         "mode": mode,
         "prompt": None,
         "image": None,
+        "image_media": "image/png",
         "reveal": None,
     }
 
@@ -170,7 +172,24 @@ async def _build_round(
                 (r for r in pjsk.regions_for_music(music.id) if r in ("en", "jp")),
                 "en",
             )
-            png = await sbuga.get_chart_image(music.id, diff, region)  # type: ignore[arg-type]
+            clip = None
+            if chart_preview.available():
+                sus = await _safe_fetch(pjsk.chart_source_url(music.id, diff, region))
+                if sus:
+                    try:
+                        clip = await chart_clip.render_clip(
+                            sus.decode("utf-8", "replace")
+                        )
+                    except chart_clip.ChartClipError:
+                        clip = None  # renderer missing/broken: fall back to the crop
+            if clip:
+                round_data["image"] = clip
+                round_data["image_media"] = "video/mp4"
+                return round_data
+            try:
+                png = await sbuga.get_chart_image(music.id, diff, region)  # type: ignore[arg-type]
+            except Exception:
+                return None
             round_data["image"] = (
                 await unblock.to_process_with_timeout(_crop_chart, png)
             ).getvalue()
@@ -273,6 +292,7 @@ def _meta(
         "answer_name": round_data["answer_name"],
         "prompt": round_data["prompt"],
         "has_image": round_data["image"] is not None,
+        "image_media": round_data["image_media"],
         "has_reveal": round_data["reveal"] is not None,
         "expires_at": expires_at,
         "user_id": user_id,
@@ -345,6 +365,7 @@ async def start_round(
         "type": meta["type"],
         "prompt": meta["prompt"],
         "has_image": meta["has_image"],
+        "image_media": meta["image_media"],
         "has_reveal": meta["has_reveal"],
         "expires_at": expires_at,
     }
@@ -355,7 +376,9 @@ async def round_image(round_id: str) -> Response:
     img = await redis_state.get_round_image(round_id)
     if not img:
         raise HTTPException(status_code=404, detail="not found")
-    return Response(content=img, media_type="image/png")
+    meta = await redis_state.get_round(round_id)
+    media = (meta or {}).get("image_media", "image/png")
+    return Response(content=img, media_type=media)
 
 
 @router.get("/guess/round/{round_id}/reveal")

@@ -255,6 +255,41 @@ function playerLog(icon, text, cls) {
   hubSend({ op: "log", entry });
 }
 
+// round media is either a chart-clip video or a cropped image; swap the right element in
+function setRoundMedia(imgId, videoId, round) {
+  const img = $(imgId);
+  const video = $(videoId);
+  const url = `${API}/api/activity/guess/round/${round.round_id}/image`;
+  if (round.image_media === "video/mp4") {
+    img.hidden = true;
+    img.removeAttribute("src");
+    video.src = url;
+    video.hidden = false;
+    video.play().catch(() => {}); // sticky activation from the start click lets sound play
+  } else {
+    clearVideo(video);
+    img.src = url;
+    img.hidden = false;
+  }
+}
+
+function clearVideo(video) {
+  if (!video) return;
+  video.hidden = true;
+  try {
+    video.pause();
+  } catch {}
+  video.removeAttribute("src");
+  video.load();
+}
+
+function clearRoundMedia(imgId, videoId) {
+  const img = $(imgId);
+  img.hidden = true;
+  img.removeAttribute("src");
+  clearVideo($(videoId));
+}
+
 async function startRound(mode) {
   currentMode = mode;
   currentRound = null;
@@ -266,7 +301,7 @@ async function startRound(mode) {
   $("btn-again").hidden = true;
   $("guess-form").hidden = false;
   $("btn-giveup").hidden = true; // shown once the round is live
-  $("round-image").hidden = true;
+  clearRoundMedia("round-image", "round-video");
   $("round-timer").hidden = true; // no timer while loading
   $("round-prompt").textContent = "Loading…";
   $("guess-input").value = "";
@@ -292,9 +327,7 @@ async function startRound(mode) {
   currentRound = round;
   $("round-prompt").textContent = round.prompt || "";
   if (round.has_image) {
-    const img = $("round-image");
-    img.src = `${API}/api/activity/guess/round/${round.round_id}/image`;
-    img.hidden = false;
+    setRoundMedia("round-image", "round-video", round);
   }
   setFormEnabled(true);
   $("btn-giveup").hidden = false;
@@ -306,6 +339,7 @@ async function startRound(mode) {
     mode_label: $("round-mode").textContent,
     prompt: round.prompt,
     has_image: round.has_image,
+    image_media: round.image_media,
     has_reveal: round.has_reveal,
     expires_at: round.expires_at,
   };
@@ -325,6 +359,7 @@ function showReveal(round, message, cls) {
   $("btn-again").hidden = false;
   // the guess log stays visible after the reveal on purpose
   if (round.has_reveal) {
+    clearVideo($("round-video")); // reveal is always the full chart image
     const img = $("round-image");
     img.src = `${API}/api/activity/guess/round/${round.round_id}/reveal`;
     img.hidden = false;
@@ -675,9 +710,7 @@ function stopSpectating() {
 
 function resetSpectateView() {
   $("spectate-prompt").textContent = "";
-  const img = $("spectate-image");
-  img.hidden = true;
-  img.removeAttribute("src");
+  clearRoundMedia("spectate-image", "spectate-video");
   $("spectate-typing").innerHTML = "";
   $("spectate-result").textContent = "";
   $("spectate-result").className = "";
@@ -689,13 +722,10 @@ function resetSpectateView() {
 function applySpectateRound(round) {
   if (!round) return;
   $("spectate-prompt").textContent = round.prompt || "";
-  const img = $("spectate-image");
   if (round.has_image && round.round_id) {
-    img.src = `${API}/api/activity/guess/round/${round.round_id}/image`;
-    img.hidden = false;
+    setRoundMedia("spectate-image", "spectate-video", round);
   } else {
-    img.hidden = true;
-    img.removeAttribute("src");
+    clearRoundMedia("spectate-image", "spectate-video");
   }
   if (round.expires_at) startSpectateTimer(round.expires_at);
   else $("spectate-timer").hidden = true;
@@ -740,6 +770,7 @@ function spectateResult(result) {
   el.textContent = result.text || "";
   el.className = result.cls || "";
   if (result.has_reveal && result.round_id) {
+    clearVideo($("spectate-video"));
     const img = $("spectate-image");
     img.src = `${API}/api/activity/guess/round/${result.round_id}/reveal`;
     img.hidden = false;
