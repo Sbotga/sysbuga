@@ -63,16 +63,19 @@ def _cut_window(sus_text: str) -> tuple[bytes, int] | None:
 
 def _settings(starting_combo: int, mirror: bool) -> str:
     payload = {
-        "exportHeight": 720,
-        "exportFps": 24,
+        "exportHeight": 576,
+        "exportFps": 48,
         "exportPreset": 0,  # veryfast
+        "exportAudioKbps": 128,
         "pvShowStart": False,
         "pvDrawScoreHud": False,
         "pvDrawLifeHud": False,
         "pvClearType": _CLEAR_TYPE_NONE,
-        "pvPreRollDuration": 3.0,
+        "pvPreRollDuration": 1.0,
         "pvStartingCombo": starting_combo,
         "pvMirrorScore": mirror,
+        "pvWatermarkEnabled": True,
+        "pvWatermarkText": "Rendered by\nSYSbuga Discord Bot",
     }
     return json.dumps(payload)
 

@@ -26,7 +26,12 @@ if TYPE_CHECKING:
     from main import SbugaBot
 
 GUESS_TIME = 60
-MODE_TIME = {"character": 30, "character_bw": 30, "chart_append": 20}
+MODE_TIME = {
+    "character": 30,
+    "character_bw": 30,
+    "chart": 90,
+    "chart_append": 90,
+}
 GUESS_PREFIX = "-"
 _ASSET_ATTEMPTS = 5
 _CHART_CLIP_ATTEMPTS = 3  # capped lower: each attempt may render a video

@@ -343,16 +343,7 @@ class InfoCog(commands.Cog):
                 embed=embeds.error_embed(f"Couldn't find a song matching `{song}`.")
             )
             return
-        try:
-            aliases = await self.bot.sbuga.get_song_aliases()  # type: ignore[union-attr]
-        except SbugaError as e:
-            await interaction.followup.send(
-                embed=embeds.error_embed(
-                    f"Couldn't fetch aliases: {e.detail or e.status}"
-                )
-            )
-            return
-        names = sorted(a.alias for a in aliases if a.music_id == music.id)
+        names = sorted(self.bot.pjsk.song_aliases(music.id))  # type: ignore[union-attr]
         embed = embeds.embed(
             title=f"Aliases - {music.title}",
             description=(

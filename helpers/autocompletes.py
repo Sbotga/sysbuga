@@ -116,6 +116,11 @@ class Autocompletes:
             musics = self.pjsk.musics()[:25]
         else:
             ids = self.pjsk.search_songs(current, limit=25)
+            # the command matches on best_song_id; surface that pick first so what you'd
+            # actually match is never missing from the list
+            best = self.pjsk.best_song_id(current)
+            if best is not None:
+                ids = [best] + [i for i in ids if i != best]
             musics = [m for m in (self.pjsk.get_music(i) for i in ids) if m]
         return [
             app_commands.Choice(name=m.title[:100], value=str(m.id)) for m in musics
@@ -130,6 +135,9 @@ class Autocompletes:
             events = self.pjsk.events()[:25]
         else:
             ids = self.pjsk.search_events(current, limit=25)
+            best = self.pjsk.best_event_id(current)
+            if best is not None:
+                ids = [best] + [i for i in ids if i != best]
             events = [e for e in (self.pjsk.get_event(i) for i in ids) if e]
         return [
             app_commands.Choice(name=e.name[:100], value=str(e.id)) for e in events

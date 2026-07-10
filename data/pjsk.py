@@ -278,6 +278,10 @@ class PJSKData:
         """Every key the matcher accepts for this song (title, aliases, romanizations)."""
         return search.song_keys(music_id)
 
+    def song_aliases(self, music_id: int) -> list[str]:
+        """Manually-added aliases from cache (refreshed every 120s and on each edit)."""
+        return list(self._song_aliases.get(music_id, ()))
+
     def best_event_id(self, query: str) -> int | None:
         return search.best_event_match(query)
 

@@ -431,12 +431,7 @@ class SongInfo(commands.Cog):
         if not music:
             return
 
-        manual: list[str] = []
-        try:
-            all_aliases = await self.bot.sbuga.get_song_aliases()  # type: ignore[union-attr]
-            manual = sorted(a.alias for a in all_aliases if a.music_id == music.id)
-        except SbugaError:
-            pass  # reads are public; if it fails, still show the generated ones
+        manual = sorted(self.bot.pjsk.song_aliases(music.id))  # type: ignore[union-attr]
 
         # Show the keys the *matcher* actually accepts (not the backend's
         # title_variants), minus the manual aliases, the title, and the bare id.

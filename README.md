@@ -14,7 +14,8 @@ A Discord-only Project Sekai bot. All PJSK data comes from **sbuga.com's public 
    exports ids to `data/emojis.json`; re-run whenever new emoji images are added)
 5. Download unidic data `python -m unidic download`
 6. Install required libraries (Linux and Windows need FFMPEG! install in path (or put into libraries as ffmpeg.exe for Windows))
-7. Run: `python main.py`
+7. Remember to `chmod +x` the Linux executable every time you reupload it!!!!!
+8. Run: `python main.py`
 
 ### Ubuntu (venv) 3.14+
 bcz mojimoji and libraries

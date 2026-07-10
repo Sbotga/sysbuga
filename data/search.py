@@ -155,7 +155,9 @@ def _query_variants(query: str) -> list[str]:
     query_pp = preprocess(query)
     variants = [query_pp, *_romanize(query_pp)]
     variants.extend(f for f in map(_fold, list(variants)) if f)
-    return list(dict.fromkeys(variants))
+    # "slow downer" -> "slowdowner" matches the unspaced title key
+    variants.extend(v.replace(" ", "") for v in list(variants))
+    return list(dict.fromkeys(v for v in variants if v))
 
 
 LevelKey = tuple[int, int, str]
