@@ -528,22 +528,51 @@ class GuessCog(commands.Cog):
             "data": {},
         }
         self.bot.cache.guess_channels[interaction.channel.id] = guess  # type: ignore[union-attr]
+        # a chart round renders a video first (a few seconds); show a placeholder so the
+        # channel is visibly locked, then edit it in. startTime only begins after the edit,
+        # so the timer and guessing don't start until the chart is actually shown.
+        is_chart = mode in ("chart", "chart_append")
         try:
+            if is_chart:
+                await interaction.edit_original_response(
+                    embed=embeds.embed(
+                        title="Guess The Chart",
+                        description="Rendering the chart clip… (~5 seconds)",
+                        color=discord.Color.dark_gold(),
+                    )
+                )
             embed, file = await self._build_round(interaction, mode, guess)
             if embed is None:
                 self.remove_guess(self.bot, interaction.channel.id)  # type: ignore[union-attr]
-                await interaction.followup.send(
-                    embed=embeds.error_embed(
-                        "That guessing mode isn't available yet (missing data)."
-                    )
+                err = embeds.error_embed(
+                    "That guessing mode isn't available yet (missing data)."
                 )
+                if is_chart:
+                    await interaction.edit_original_response(embed=err, attachments=[])
+                else:
+                    await interaction.followup.send(embed=err)
                 return
-            await interaction.followup.send(
-                embed=embed, file=file or discord.utils.MISSING
-            )
+            if is_chart:
+                await interaction.edit_original_response(
+                    embed=embed, attachments=[file] if file else []
+                )
+            else:
+                await interaction.followup.send(
+                    embed=embed, file=file or discord.utils.MISSING
+                )
             guess["startTime"] = time.time()
         except Exception:
             self.remove_guess(self.bot, interaction.channel.id)  # type: ignore[union-attr]
+            if is_chart:
+                try:
+                    await interaction.edit_original_response(
+                        embed=embeds.error_embed(
+                            "Something went wrong preparing the chart."
+                        ),
+                        attachments=[],
+                    )
+                except discord.HTTPException:
+                    pass
             raise
 
     async def _build_round(

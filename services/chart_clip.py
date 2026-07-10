@@ -63,8 +63,8 @@ def _cut_window(sus_text: str) -> tuple[bytes, int] | None:
 
 def _settings(starting_combo: int, mirror: bool) -> str:
     payload = {
-        "exportHeight": 480,
-        "exportFps": 30,
+        "exportHeight": 360,
+        "exportFps": 24,
         "exportPreset": 0,  # veryfast
         "exportEncThreads": 1,
         "exportAudioKbps": 128,
