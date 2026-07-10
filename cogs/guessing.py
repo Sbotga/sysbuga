@@ -20,7 +20,7 @@ from helpers import converters, embeds, tools, unblock
 from helpers.autocompletes import autocompletes
 from helpers.emojis import emojis
 from helpers.views import SbugaView
-from services import chart_clip, chart_preview
+from services import chart_cache, chart_clip, chart_preview
 from services.sbuga import SbugaError
 
 if TYPE_CHECKING:
@@ -86,11 +86,17 @@ class GuessCog(commands.Cog):
         self.check_guess_task.start()
 
     async def cog_load(self) -> None:
-        # warm the render server in the background (don't block startup on a slow binary)
-        asyncio.create_task(chart_preview.start())
+        # warm the render server, then keep the clip cache topped up in the background
+        async def _boot() -> None:
+            await chart_preview.start()
+            chart_cache.cleanup_invalid()  # drop entries a prior crash left half-generated
+            chart_cache.start(self.bot.pjsk)
+
+        asyncio.create_task(_boot())
 
     async def cog_unload(self) -> None:
         self.check_guess_task.cancel()
+        await chart_cache.stop()
         await chart_preview.stop()
 
     # --- random pickers ---
@@ -164,7 +170,33 @@ class GuessCog(commands.Cog):
         raw = await _fetch_bytes(url)
         return raw.decode("utf-8", "replace") if raw else None
 
+    async def _chart_reveal_png(
+        self, music_id: int, difficulty: str, mirror: bool
+    ) -> bytes | None:
+        region = next((r for r in self.bot.pjsk.regions_for_music(music_id) if r in ("en", "jp")), "en")  # type: ignore[union-attr]
+        try:
+            return await self.bot.sbuga.get_chart_image(music_id, difficulty, region, mirrored=mirror)  # type: ignore[union-attr,arg-type]
+        except SbugaError:
+            return None
+
     async def _pick_chart_clip(self, has_append: bool, mirror: bool):
+        """(music, clip mp4, reveal png, difficulty, answer video | None)."""
+        gtype = "chart_append" if has_append else "chart"
+        # non-mirrored users can grab a pre-rendered (higher quality) clip instantly
+        if not mirror:
+            cached = chart_cache.pop(gtype)
+            if cached:
+                clip, answer, meta = cached
+                music = self.bot.pjsk.get_music(meta["music_id"])  # type: ignore[union-attr]
+                if music:
+                    png = await self._chart_reveal_png(music.id, meta["diff"], False)
+                    return music, clip, png, meta["diff"], answer
+        # nothing cached (or mirror): render on the fly, smaller/faster, live-priority.
+        # on-the-fly has no answer video (the audio must not leak during the round).
+        with chart_cache.live_priority():
+            return await self._render_chart_clip_live(has_append, mirror)
+
+    async def _render_chart_clip_live(self, has_append: bool, mirror: bool):
         for _ in range(_CHART_CLIP_ATTEMPTS):
             music = self._random_song(
                 has_append=has_append, needs_master=not has_append
@@ -177,7 +209,12 @@ class GuessCog(commands.Cog):
             if not sus_text:
                 continue
             try:
-                clip = await chart_clip.render_clip(sus_text, mirror=mirror)
+                clip = await chart_clip.render_clip(
+                    sus_text,
+                    mirror=mirror,
+                    height=chart_clip.LIVE_HEIGHT,
+                    fps=chart_clip.LIVE_FPS,
+                )
             except chart_clip.ChartClipError as exc:
                 # a render failure is a renderer problem, not a chart one — bail so the
                 # caller falls back to the cropped image instead of retrying identically
@@ -187,12 +224,8 @@ class GuessCog(commands.Cog):
                 return None
             if not clip:
                 continue
-            # full chart for the reveal (best-effort)
-            try:
-                png = await self.bot.sbuga.get_chart_image(music.id, difficulty, region, mirrored=mirror)  # type: ignore[union-attr,arg-type]
-            except SbugaError:
-                png = None
-            return music, clip, png, difficulty
+            png = await self._chart_reveal_png(music.id, difficulty, mirror)
+            return music, clip, png, difficulty, None
         return None
 
     async def _pick_card_art(self):
@@ -341,6 +374,11 @@ class GuessCog(commands.Cog):
             data["answer_file_path"].seek(0)
             files.append(discord.File(data["answer_file_path"], "image.png"))
             kwargs["image"] = True
+        if data["data"].get("answer_video"):
+            files.append(
+                discord.File(io.BytesIO(data["data"]["answer_video"]), "answer.mp4")
+            )
+            kwargs["video"] = True
         return files, kwargs
 
     # --- timeout loop ---
@@ -528,16 +566,17 @@ class GuessCog(commands.Cog):
             "data": {},
         }
         self.bot.cache.guess_channels[interaction.channel.id] = guess  # type: ignore[union-attr]
-        # a chart round renders a video first (a few seconds); show a placeholder so the
-        # channel is visibly locked, then edit it in. startTime only begins after the edit,
-        # so the timer and guessing don't start until the chart is actually shown.
+        # a chart round with no cached clip renders one on the fly (several seconds); show a
+        # placeholder so the channel is visibly locked, then edit it in. startTime only
+        # begins after the edit, so the timer and guessing wait for the chart to appear.
         is_chart = mode in ("chart", "chart_append")
+        rendering_live = is_chart and chart_cache.count(mode) == 0
         try:
-            if is_chart:
+            if rendering_live:
                 await interaction.edit_original_response(
                     embed=embeds.embed(
                         title="Guess The Chart",
-                        description="Rendering the chart clip… (~5 seconds)",
+                        description="Rendering the chart clip… (~10 seconds)",
                         color=discord.Color.dark_gold(),
                     )
                 )
@@ -626,11 +665,13 @@ class GuessCog(commands.Cog):
                     else None
                 )
                 if clip_hit:
-                    music, clip, png, diff = clip_hit
+                    music, clip, png, diff, answer_video = clip_hit
                     guess["answer"] = music.id
                     guess["answerName"] = music.title
                     if png:  # reveal (/guess end) still shows the full chart
                         guess["answer_file_path"] = io.BytesIO(png)
+                    if answer_video:  # cached clips also reveal a jacket+audio video
+                        guess["data"]["answer_video"] = answer_video
                     embed = embeds.embed(
                         title="Guess The Chart", color=discord.Color.dark_gold()
                     )

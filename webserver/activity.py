@@ -31,7 +31,7 @@ from data.pjsk import character_display_name
 from data.search import preprocess
 from data.song_equivalents import songs_equivalent
 from helpers import converters, unblock
-from services import chart_clip, chart_preview
+from services import chart_cache, chart_clip, chart_preview
 from webserver import redis_state, spectate
 
 if TYPE_CHECKING:
@@ -168,6 +168,19 @@ async def _build_round(
 
         if mode in ("chart", "chart_append"):
             diff = "append" if mode == "chart_append" else "master"
+            # a pre-rendered clip (shared with the bot) plays instantly; its answer is the
+            # cached song, not the one randomly picked above
+            cached = chart_cache.pop(mode)
+            if cached:
+                mp4, _answer, meta = cached  # activity doesn't surface the answer video
+                cm = pjsk.get_music(meta["music_id"])
+                if cm:
+                    round_data["answer_id"] = cm.id
+                    round_data["answer_name"] = cm.title
+                    round_data["reveal"] = await _safe_fetch(cm.jacket_url)
+                    round_data["image"] = mp4
+                    round_data["image_media"] = "video/mp4"
+                    return round_data
             region = next(
                 (r for r in pjsk.regions_for_music(music.id) if r in ("en", "jp")),
                 "en",
@@ -178,7 +191,9 @@ async def _build_round(
                 if sus:
                     try:
                         clip = await chart_clip.render_clip(
-                            sus.decode("utf-8", "replace")
+                            sus.decode("utf-8", "replace"),
+                            height=chart_clip.LIVE_HEIGHT,
+                            fps=chart_clip.LIVE_FPS,
                         )
                     except chart_clip.ChartClipError:
                         clip = None  # renderer missing/broken: fall back to the crop

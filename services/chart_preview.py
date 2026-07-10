@@ -113,17 +113,24 @@ async def render(
     output: Path,
     *,
     settings: Path | None = None,
+    cover: Path | None = None,
+    bgm: Path | None = None,
     crf: int = 18,
     default_settings: bool = True,
     timeout: float | None = 180.0,
 ) -> Path:
-    """Export `chart` (.json.gz) to `output` as MP4. `crf` is the per-render libx264 quality
-    (0-51, lower = better/larger); `default_settings` starts from built-in defaults so a
-    render doesn't inherit a previous request's state."""
+    """Export `chart` (.json.gz) to `output` as MP4. `cover`/`bgm` are optional files nxsk
+    classifies by extension (a .png cover, an audio bgm). `crf` is the per-render libx264
+    quality (0-51, lower = better/larger); `default_settings` starts from built-in defaults
+    so a render doesn't inherit a previous request's state."""
     output.parent.mkdir(parents=True, exist_ok=True)
     tokens = [str(chart)]
     if settings is not None:
         tokens.append(str(settings))
+    if cover is not None:
+        tokens.append(str(cover))
+    if bgm is not None:
+        tokens.append(str(bgm))
     if default_settings:
         tokens.append("--default-settings")
     tokens += ["--crf", str(crf), "--export", str(output)]
