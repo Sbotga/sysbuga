@@ -66,6 +66,7 @@ def _settings(starting_combo: int, mirror: bool) -> str:
         "exportHeight": 480,
         "exportFps": 30,
         "exportPreset": 0,  # veryfast
+        "exportEncThreads": 1,
         "exportAudioKbps": 128,
         "pvShowStart": False,
         "pvDrawScoreHud": False,
