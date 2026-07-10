@@ -23,6 +23,17 @@ class DevCog(commands.Cog):
         return ctx.author.id in (self.bot.owner_ids or set())
 
     @commands.command()
+    async def dev_help(self, ctx: commands.Context) -> None:
+        names = sorted(c.name for c in self.get_commands())
+        await ctx.reply(
+            embed=embeds.embed(
+                title="Dev Commands",
+                description="\n".join(f"`{n}`" for n in names),
+                color=discord.Color.blurple(),
+            )
+        )
+
+    @commands.command()
     async def eval(self, ctx: commands.Context) -> None:
         cmd = ctx.message.content.split("\n")
         del cmd[0]
@@ -125,6 +136,31 @@ class DevCog(commands.Cog):
                     title="Update Failed",
                 )
             )
+
+    @commands.command()
+    async def chart_clip_status(self, ctx: commands.Context) -> None:
+        from services import chart_cache
+
+        s = chart_cache.stats()
+        labels = {"chart": "Charts", "chart_append": "Chart Appends"}
+        pools = "\n".join(
+            f"**{labels.get(t, t)}:** {have}/{target}"
+            for t, (have, target) in s["pools"].items()
+        )
+        if s["generated"]:
+            gen = (
+                f"**Generated this session:** {s['generated']}\n"
+                f"**Average generation time:** {s['avg_seconds']:.1f}s"
+            )
+        else:
+            gen = "None generated so far."
+        await ctx.reply(
+            embed=embeds.embed(
+                title="Chart Clip Cache",
+                description=f"{pools}\n\n{gen}",
+                color=discord.Color.blurple(),
+            )
+        )
 
     @commands.command()
     async def refresh(self, ctx: commands.Context) -> None:

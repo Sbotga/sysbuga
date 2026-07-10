@@ -78,8 +78,11 @@ def cut_window(sus_text: str) -> "Window | None":
 
 
 # cached (pre-rendered) clips get the nicer quality; the on-the-fly fallback is smaller/faster
-CACHED_HEIGHT, CACHED_FPS = 720, 60
+CACHED_HEIGHT, CACHED_FPS = 576, 48
 LIVE_HEIGHT, LIVE_FPS = 360, 24
+
+# how many pre-rendered clips to keep on disk per chart-guess type
+TARGETS = {"chart": 100, "chart_append": 100}
 
 
 def _settings(starting_combo: int, mirror: bool, height: int, fps: int) -> str:

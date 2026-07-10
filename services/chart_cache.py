@@ -1,7 +1,8 @@
 """Pre-render chart-guess clips to disk so a round can grab one instantly.
 
-A background worker keeps up to TARGET_PER_TYPE clips per chart type on disk, rendering at
-the cached (higher) quality whenever the pool is below target and no live render is waiting.
+A background worker keeps up to chart_clip.TARGETS[type] clips per chart type on disk,
+rendering at the cached (higher) quality whenever a pool is below target and no live render
+is waiting.
 A round pops one instantly; if the pool is empty it renders on the fly (smaller/faster).
 Clips are stored non-mirrored, so a user with mirror on always renders live.
 
@@ -19,6 +20,7 @@ import os
 import random
 import secrets
 import shutil
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -30,8 +32,7 @@ if TYPE_CHECKING:
     from data.pjsk import PJSKData
 
 CACHE_ROOT = Path("cache/chart_clips")
-TARGET_PER_TYPE = 100
-TYPES = ("chart", "chart_append")
+TYPES = tuple(chart_clip.TARGETS)  # ("chart", "chart_append")
 _POLL_SECONDS = 10.0
 
 _task: "asyncio.Task | None" = None
@@ -40,6 +41,17 @@ _running = False
 # on-the-fly renders in flight; the filler pauses while any are waiting so a live round
 # doesn't queue behind cache-fill work
 _live_pending = 0
+# this-process generation stats (the filler runs in the bot)
+_stats = {"generated": 0, "seconds": 0.0}
+
+
+def stats() -> dict[str, Any]:
+    n = _stats["generated"]
+    return {
+        "generated": n,
+        "avg_seconds": (_stats["seconds"] / n) if n else 0.0,
+        "pools": {t: (count(t), chart_clip.TARGETS[t]) for t in TYPES},
+    }
 
 
 def _dir(gtype: str) -> Path:
@@ -222,15 +234,22 @@ async def _worker() -> None:
         if not chart_preview.available() or _live_pending:
             await asyncio.sleep(_POLL_SECONDS)
             continue
-        target = next((t for t in TYPES if count(t) < TARGET_PER_TYPE), None)
-        if target is None:
+        # fill the least-rendered pool; on a tie pick randomly, so they grow together
+        candidates = [t for t in TYPES if count(t) < chart_clip.TARGETS[t]]
+        if not candidates:
             await asyncio.sleep(_POLL_SECONDS)  # all pools full
             continue
+        fewest = min(count(t) for t in candidates)
+        target = random.choice([t for t in candidates if count(t) == fewest])
+        started = time.perf_counter()
         try:
             ok = await _render_one(target)
         except Exception:
             ok = False
-        if not ok:
+        if ok:
+            _stats["generated"] += 1
+            _stats["seconds"] += time.perf_counter() - started
+        else:
             await asyncio.sleep(_POLL_SECONDS)  # missing SUS / renderer down: back off
 
 
