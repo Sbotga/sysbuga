@@ -828,14 +828,12 @@ class GuessCog(commands.Cog):
     async def character_bw(self, interaction: discord.Interaction) -> None:
         await self.handle_guess(interaction, "character_bw")
 
-    @guess.command(
-        name="chart", description="Guess the song from a cropped Master chart."
-    )
+    @guess.command(name="chart", description="Guess the song from a Master chart clip.")
     async def chart(self, interaction: discord.Interaction) -> None:
         await self.handle_guess(interaction, "chart")
 
     @guess.command(
-        name="chart_append", description="Guess the song from a cropped Append chart."
+        name="chart_append", description="Guess the song from an Append chart clip."
     )
     async def chart_append(self, interaction: discord.Interaction) -> None:
         await self.handle_guess(interaction, "chart_append")

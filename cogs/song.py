@@ -103,7 +103,7 @@ class SongInfo(commands.Cog):
         embed.set_image(url=music.jacket_url)
         await interaction.followup.send(embed=embed)
 
-    @song.command(name="constant", description="View a song's 39s constant.")
+    @song.command(name="constant", description="View a song's chart constant.")
     @app_commands.autocomplete(
         song=autocompletes.pjsk_song,
         difficulty=autocompletes.custom_values(

@@ -124,7 +124,7 @@ class DevCog(commands.Cog):
             constants = self.bot.constants
             await ctx.reply(
                 embed=embeds.success_embed(
-                    f"**39s:** `{len(constants.constants)}` charts\n"
+                    f"**Constants:** `{len(constants.constants)}` charts\n"
                     f"**Overrides:** `{len(constants.constants_override)}` charts",
                     title="Constants Updated",
                 )

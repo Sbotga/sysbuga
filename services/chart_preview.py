@@ -29,7 +29,10 @@ _SERVER_START_TIMEOUT = 90.0  # one-time gl + asset load, per session
 
 # max total live sessions (active + idle). Each is a full GL context + assets, so this is the
 # memory ceiling — lower it on a tight box.
-MAX_SESSIONS = 4
+MAX_SESSIONS = 3
+# retire a session after this many renders and spawn a fresh one, so leaked GL memory / CPU
+# creep from a long-lived process doesn't accumulate
+_RENDERS_PER_SESSION = 7
 _IDLE_GRACE = (
     20.0  # a just-released session stays warm this long before it can be trimmed
 )
@@ -53,6 +56,7 @@ class ChartPreviewError(RuntimeError):
 class Session:
     def __init__(self, process: "asyncio.subprocess.Process") -> None:
         self.process = process
+        self.renders = 0  # requests served; the session is retired once it hits the cap
 
     @property
     def alive(self) -> bool:
@@ -157,7 +161,8 @@ async def _acquire() -> "Session":
 
 
 async def _release(session: "Session", healthy: bool) -> None:
-    if healthy and session.alive:
+    # retire (don't re-idle) a desynced session or one that's hit its render cap
+    if healthy and session.alive and session.renders < _RENDERS_PER_SESSION:
         async with _pool_lock:
             _idle.append((session, time.monotonic()))  # keeps its permit while idle
     else:
@@ -253,9 +258,11 @@ async def render(
             line = raw.decode("utf-8", "replace").rstrip("\r\n")
             if line.startswith("OK "):
                 healthy = True  # in sync; keep the session
+                session.renders += 1
                 return output
             if line.startswith("ERR "):
                 healthy = True  # clean reply, still in sync
+                session.renders += 1
                 raise ChartPreviewError(1, line[4:])
     except (
         asyncio.TimeoutError,

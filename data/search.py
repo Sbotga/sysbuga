@@ -58,7 +58,7 @@ def _strip_diacritics(text: str) -> str:
 
 
 CACHE_FILE = "cache/search_maps.json"
-CACHE_VERSION = 5  # bump when the cache shape OR the generated keys change
+CACHE_VERSION = 6  # bump when the cache shape OR the generated keys change
 
 
 def _is_invisible(ch: str) -> bool:
@@ -114,6 +114,15 @@ def _fold(text: str) -> str:
 
 def _with_folded(keys: set[str]) -> set[str]:
     return keys | {f for f in map(_fold, keys) if f}
+
+
+_BRACKETS_RE = re.compile(r"[\[\(【（〔].*?[\]\)】）〕]")
+
+
+def _strip_brackets(text: str) -> str:
+    """Title minus any bracketed [version]/(subtitle) segment, so a query of the base title
+    matches "Mikumiku Ni Shiteageru [Shiteyanyo]" without the part nobody types."""
+    return re.sub(r"\s+", " ", _BRACKETS_RE.sub(" ", text)).strip()
 
 
 def _romanize(text: str) -> list[str]:
@@ -327,6 +336,11 @@ def _compute_search_maps(
         real_titles.append(music.title)
         if music.pronunciation:
             real_titles.append(music.pronunciation)
+        # also index each title without its bracketed suffix (e.g. "... [Shiteyanyo]")
+        for t in list(real_titles):
+            base = _strip_brackets(t)
+            if base and preprocess(base) != preprocess(t):
+                real_titles.append(base)
 
         generated_keys: list[str] = []
         for t in list(dict.fromkeys([*real_titles, *manual_titles])):
@@ -472,6 +486,10 @@ def _compute_event_maps(
         real = [event.name, str(event.id)]
         if event.pronunciation:
             real.append(event.pronunciation)
+        for name in (event.name, event.pronunciation):
+            base = _strip_brackets(name) if name else ""
+            if base and preprocess(base) != preprocess(name):
+                real.append(base)
         generated: list[str] = []
         for source in [event.name, event.pronunciation, *event.name_variants]:
             if source:
