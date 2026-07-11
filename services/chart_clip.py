@@ -198,7 +198,7 @@ def _settings(
     total_combo: int,
     height: int,
     fps: int,
-    talent: int = 250000,
+    talent: int = 330000,
     extra: dict | None = None,
 ) -> str:
     payload = {
