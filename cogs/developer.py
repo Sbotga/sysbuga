@@ -79,9 +79,9 @@ class DevCog(commands.Cog):
             )
 
     async def _sync_global(self) -> list[app_commands.AppCommand]:
-        """tree.sync(), but keeping the activity's Entry Point command — bulk
+        """tree.sync() but keeping the activity's entry point command since bulk
         updates are not allowed to drop it (error 50240) and the tree doesn't
-        know about it."""
+        know about it"""
         tree = self.bot.tree
         app_id = self.bot.application_id
         assert app_id is not None
@@ -142,7 +142,11 @@ class DevCog(commands.Cog):
         from services import chart_cache
 
         s = chart_cache.stats()
-        labels = {"chart": "Charts", "chart_append": "Chart Appends"}
+        labels = {
+            "chart": "Charts",
+            "chart_append": "Chart Appends",
+            "chart_expert": "Chart Experts",
+        }
         pools = "\n".join(
             f"**{labels.get(t, t)}:** {have}/{target}"
             for t, (have, target) in s["pools"].items()
@@ -150,7 +154,9 @@ class DevCog(commands.Cog):
         if s["generated"]:
             gen = (
                 f"**Generated this session:** {s['generated']}\n"
-                f"**Average generation time:** {s['avg_seconds']:.1f}s"
+                f"**Avg time per clip:** {s['avg_per_clip']:.1f}s "
+                f"(rendering {chart_cache.FILL_CONCURRENCY} at once)\n"
+                f"**Avg time for 1 clip:** {s['avg_one_clip']:.1f}s"
             )
         else:
             gen = "None generated so far."

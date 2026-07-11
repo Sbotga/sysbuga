@@ -195,7 +195,7 @@ AUTO_KEY_PENALTY = 0.5
 # blended with the length-aware ratio so extra words cost something. The single-answer
 # matcher (_best_entity) deliberately does NOT use this — see its docstring.
 TOKEN_SET_WEIGHT = 0.8
-DEFAULT_SENSITIVITY = 0.67
+DEFAULT_SENSITIVITY = 0.6
 _all_artists: list[str] = []
 _all_captions: list[str] = []
 _min_level: int = 1

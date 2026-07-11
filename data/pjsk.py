@@ -12,6 +12,10 @@ from services.sbuga import Region, SbugaClient, SbugaError
 MUSIC_CACHE_FILE = "cache/music_data.json"
 EVENT_CACHE_FILE = "cache/event_data.json"
 EXTRA_CACHE_FILE = "cache/extra_data.json"
+# kept current on every alias add/remove/poll (unlike manual_aliases in the music cache,
+# which is only rewritten on a game-data version change) so a restart never shows a stale
+# alias list before the first poll
+ALIAS_CACHE_FILE = "cache/aliases.json"
 
 ALIAS_REFRESH_INTERVAL = 120
 
@@ -160,6 +164,30 @@ class PJSKData:
         }
         with open(EVENT_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
+
+    def _save_aliases(self) -> None:
+        """Persist the current alias maps (small; a few KB). JSON keys must be strings."""
+        self._ensure_dirs()
+        payload = {
+            "song": {str(k): v for k, v in self._song_aliases.items()},
+            "event": {str(k): v for k, v in self._event_aliases.items()},
+        }
+        with open(ALIAS_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+
+    def _load_aliases(self) -> bool:
+        """Load the persisted alias maps into memory. True if the file existed and applied."""
+        if not os.path.exists(ALIAS_CACHE_FILE):
+            return False
+        try:
+            with open(ALIAS_CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self._song_aliases = {int(k): v for k, v in data.get("song", {}).items()}
+            self._event_aliases = {int(k): v for k, v in data.get("event", {}).items()}
+            return True
+        except Exception as e:
+            print(f"[PJSKData] failed to load aliases from disk: {e}")
+            return False
 
     def _save_extras(self) -> None:
         self._ensure_dirs()
@@ -367,6 +395,7 @@ class PJSKData:
 
             await self._refresh_events()
             await self._refresh_extras()
+            await self._to_thread(self._save_aliases)
             return True
 
     async def _get_masters(self, files: tuple[str, ...], region: Region) -> list:
@@ -488,6 +517,7 @@ class PJSKData:
                     for eid in events_changed:
                         search.reindex_event(by_id.get(eid, []))
                     await search.save_maps()
+        await self._to_thread(self._save_aliases)
         return True
 
     async def _reindex_one_song(self, music_id: int) -> None:
@@ -499,6 +529,7 @@ class PJSKData:
             if merged:
                 search.reindex_song(merged, self._music_cache)
         await search.save_maps()
+        await self._to_thread(self._save_aliases)
 
     async def add_song_alias_local(self, music_id: int, alias: str) -> None:
         """Record an alias just added through the API and re-index that song at once, so it's
@@ -583,8 +614,12 @@ class PJSKData:
                 print(f"[PJSKData] alias refresh error: {e}")
 
     def _seed_alias_cache(self) -> None:
-        """Recover the alias maps from the on-disk data so the first poll doesn't
-        rebuild just because the in-memory cache started out empty."""
+        """Recover the alias maps from disk so the first poll doesn't rebuild just because
+        the in-memory cache started out empty. Prefer the dedicated alias cache (kept current
+        on every edit); fall back to the manual_aliases baked into the music cache, which is
+        only refreshed on a game-data version change (so it can miss recent edits)."""
+        if self._load_aliases():
+            return
         for musics in self._music_cache.values():
             for m in musics:
                 if m.manual_aliases:
@@ -597,6 +632,10 @@ class PJSKData:
     async def start(self) -> None:
         await self._to_thread(self._load_from_disk)
         self._seed_alias_cache()
+        # push the seeded aliases onto the models before building, since the search maps read
+        # them from manual_aliases/name_variants, not from self._song_aliases directly
+        self._apply_song_aliases()
+        self._apply_event_aliases()
         if self._music_cache:
             merged = list(self._merged_music().values())
             await search.build_search_maps(

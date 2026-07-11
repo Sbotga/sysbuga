@@ -1,15 +1,15 @@
-"""Render Sonolus charts to MP4 via the nxsk-chart-preview binary.
+"""render sonolus charts to mp4 via the nxsk-chart-preview binary
 
-Each nxsk process runs in `--export-cli` server mode (GL context + assets load once): it
-prints READY, then renders one request per stdin line and replies "OK <path>" / "ERR <msg>".
-A bounded pool of these sessions lets renders run in parallel — the cache filler renders a
-chart clip and its answer clip at once, and on-the-fly rounds get their own session.
+each nxsk process runs in --export-cli server mode where the gl context and assets load once,
+it prints READY then renders one request per stdin line and replies "OK <path>" or "ERR <msg>".
+a bounded pool of these sessions lets renders run in parallel, the cache filler renders a chart
+clip and its answer clip at once and on-the-fly rounds get their own session.
 
-Sessions are memory-heavy (each is a full GL context + assets), so the pool keeps only what's
-useful: a maintenance loop holds `warm_source()` idle sessions ready (the caller sets this to
-the number of empty cache pools, so a session stays warm exactly when on-the-fly renders are
-likely), and trims the rest once they've sat idle past a grace window. MAX_SESSIONS caps total
-live sessions. Needs an OpenGL context, so on a headless host each is wrapped in `xvfb-run`.
+sessions are memory-heavy since each is a full gl context and assets so the pool keeps only
+what's useful: a maintenance loop holds warm_source() idle sessions ready (the caller sets this
+to the number of empty cache pools so a session stays warm exactly when on-the-fly renders are
+likely) and trims the rest once they've sat idle past a grace window. MAX_SESSIONS caps total
+live sessions. needs an opengl context so on a headless host each is wrapped in xvfb-run.
 """
 
 import asyncio
@@ -26,22 +26,22 @@ _EXECUTABLE = _LIBRARIES / (
     "nxsk-chart-preview.exe" if os.name == "nt" else "nxsk-chart-preview"
 )
 
-_SERVER_START_TIMEOUT = 90.0  # one-time gl + asset load, per session
+_SERVER_START_TIMEOUT = 90.0  # one-time gl and asset load per session
 
-# max total live sessions (active + idle). Each is a full GL context + assets, so this is the
-# memory ceiling — lower it on a tight box.
-MAX_SESSIONS = 2
-# retire a session after this many renders and spawn a fresh one, so leaked GL memory / CPU
+# max total live sessions active plus idle
+# each is a full gl context and assets so this is the memory ceiling, lower it on a tight box
+# sized for chart_cache.FILL_CONCURRENCY filler renders plus one spare for on-the-fly rounds
+MAX_SESSIONS = 3
+# retire a session after this many renders and spawn a fresh one so leaked gl memory or cpu
 # creep from a long-lived process doesn't accumulate
 _RENDERS_PER_SESSION = 7
-_IDLE_GRACE = (
-    20.0  # a just-released session stays warm this long before it can be trimmed
-)
+# a just-released session stays warm this long before it can be trimmed
+_IDLE_GRACE = 20.0
 _MAINTAIN_INTERVAL = 3.0
 
-# a permit is held for a session's whole life (active or idle), so this bounds total sessions
+# a permit is held for a session's whole life so this bounds total sessions
 _slots = asyncio.Semaphore(MAX_SESSIONS)
-_idle: "list[tuple[Session, float]]" = []  # (session, idle_since monotonic)
+_idle: "list[tuple[Session, float]]" = []  # session and idle_since monotonic
 _pool_lock = asyncio.Lock()
 _warm_source: "Callable[[], int] | None" = None  # how many idle sessions to keep ready
 _maintain_task: "asyncio.Task | None" = None
@@ -57,7 +57,9 @@ class ChartPreviewError(RuntimeError):
 class Session:
     def __init__(self, process: "asyncio.subprocess.Process") -> None:
         self.process = process
-        self.renders = 0  # requests served; the session is retired once it hits the cap
+        self.renders = (
+            0  # requests served then the session is retired once it hits the cap
+        )
 
     @property
     def alive(self) -> bool:
@@ -65,13 +67,13 @@ class Session:
 
 
 def available() -> bool:
-    """Whether the renderer binary is present. Callers can fall back when it isn't."""
+    """whether the renderer binary is present so callers can fall back when it isn't"""
     return _EXECUTABLE.is_file()
 
 
 def set_warm_source(fn: "Callable[[], int] | None") -> None:
-    """Register a function returning how many idle sessions to keep warm (clamped to
-    MAX_SESSIONS). The maintenance loop reads it each tick."""
+    """register a function returning how many idle sessions to keep warm clamped to MAX_SESSIONS
+    the maintenance loop reads it each tick"""
     global _warm_source
     _warm_source = fn
 
@@ -86,7 +88,7 @@ def _warm_target() -> int:
 
 
 def _headless_argv(argv: list[str]) -> list[str]:
-    """Wrap in Xvfb when there is no display, so the GL context can be created headless."""
+    """wrap in xvfb when there is no display so the gl context can be created headless"""
     if os.name == "nt" or os.environ.get("DISPLAY"):
         return argv
     xvfb_run = shutil.which("xvfb-run")
@@ -98,12 +100,12 @@ def _headless_argv(argv: list[str]) -> list[str]:
 
 
 # --- orphan cleanup ---------------------------------------------------------------
-# Sessions are started in their own session group (so os.killpg can take down xvfb + the
-# renderer together). The flip side: on a crash or SIGKILL, stop() never runs and those
-# detached groups keep running, each holding a GL context + assets. We record every spawned
-# pid to a pidfile and, on the next startup, kill any that are still one of our renderers.
-# The pidfile is keyed per pm2 instance / entry script, so a restart reaps its OWN leftovers
-# while a concurrently-running sibling (e.g. the activity workers) is never touched.
+# sessions start in their own group so os.killpg can take down xvfb and the renderer together
+# the flip side is that on a crash or sigkill stop() never runs and those detached groups keep
+# running each holding a gl context and assets
+# we record every spawned pid to a pidfile and on the next startup kill any still one of ours
+# the pidfile is keyed per pm2 instance or entry script so a restart reaps its own leftovers
+# while a concurrently-running sibling like the activity workers is never touched
 
 
 def _pidfile() -> Path:
@@ -117,8 +119,8 @@ def _pidfile() -> Path:
 
 
 def _record_session(pid: int) -> None:
-    # "<owner pid> <session pid>": the owner lets a sweep tell a leftover (owner dead) from
-    # a sibling worker's live session (owner alive) even when they share this pidfile
+    # "<owner pid> <session pid>" the owner lets a sweep tell a leftover with owner dead from
+    # a sibling worker's live session with owner alive even when they share this pidfile
     try:
         pf = _pidfile()
         pf.parent.mkdir(parents=True, exist_ok=True)
@@ -141,9 +143,9 @@ def _alive(pid: int) -> bool:
 
 
 def _is_renderer(pid: int) -> bool:
-    """Guard against killing an unrelated process that reused a recorded pid."""
+    """guard against killing an unrelated process that reused a recorded pid"""
     if os.name == "nt":
-        return True  # dev only; the taskkill below is best-effort
+        return True  # dev only and the taskkill below is best-effort
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             return b"nxsk-chart-preview" in f.read()
@@ -166,9 +168,10 @@ def _hard_kill(pid: int) -> None:
 
 
 def cleanup_orphans() -> None:
-    """Kill nxsk sessions leaked by a previous run (crash / SIGKILL, where stop() never ran).
-    Only sessions whose owner process is gone are reaped, so a concurrently-running sibling's
-    live sessions are left alone. Run once at startup, before spawning anything."""
+    """kill nxsk sessions leaked by a previous run where stop() never ran on a crash or sigkill
+    only sessions whose owner process is gone are reaped so a concurrently-running sibling's
+    live sessions are left alone
+    run once at startup before spawning anything"""
     pf = _pidfile()
     try:
         lines = pf.read_text("utf-8").splitlines()
@@ -186,7 +189,7 @@ def cleanup_orphans() -> None:
         if _alive(owner):
             keep.append(line)  # a live instance still owns this session
         elif _is_renderer(session):
-            _hard_kill(session)  # owner is gone: leftover, reap it
+            _hard_kill(session)  # owner is gone so reap the leftover
     try:
         if keep:
             pf.write_text("\n".join(keep) + "\n", "utf-8")
@@ -197,9 +200,9 @@ def cleanup_orphans() -> None:
 
 
 async def _kill(session: "Session") -> None:
-    """kill the whole process group: on linux the child is `xvfb-run`, which forks xvfb +
-    the renderer, so killing just it orphans them. on windows the child is the renderer.
-    """
+    """kill the whole process group
+    on linux the child is xvfb-run which forks xvfb and the renderer so killing just it orphans them
+    on windows the child is the renderer"""
     process = session.process
     try:
         if os.name == "nt":
@@ -215,7 +218,7 @@ async def _kill(session: "Session") -> None:
 
 
 async def _spawn() -> "Session":
-    """Start a session and wait for READY. Caller must already hold a slot permit."""
+    """start a session and wait for READY where the caller must already hold a slot permit"""
     if not _EXECUTABLE.is_file():
         raise ChartPreviewError(-1, f"renderer not found at {_EXECUTABLE}")
     process = await asyncio.create_subprocess_exec(
@@ -244,8 +247,8 @@ async def _spawn() -> "Session":
 
 
 async def _acquire() -> "Session":
-    """A ready session for one render — reused from idle or freshly spawned (bounded by
-    MAX_SESSIONS). A reused session keeps its permit; a new one takes a fresh permit."""
+    """a ready session for one render reused from idle or freshly spawned bounded by MAX_SESSIONS
+    a reused session keeps its permit and a new one takes a fresh permit"""
     async with _pool_lock:
         if _idle:
             return _idle.pop()[0]
@@ -262,7 +265,7 @@ async def _acquire() -> "Session":
 
 
 async def _release(session: "Session", healthy: bool) -> None:
-    # retire (don't re-idle) a desynced session or one that's hit its render cap
+    # retire rather than re-idle a desynced session or one that's hit its render cap
     if healthy and session.alive and session.renders < _RENDERS_PER_SESSION:
         async with _pool_lock:
             _idle.append((session, time.monotonic()))  # keeps its permit while idle
@@ -272,7 +275,7 @@ async def _release(session: "Session", healthy: bool) -> None:
 
 
 async def _warm_one() -> None:
-    """Spawn a session straight into the idle pool. Only call when a permit is free."""
+    """spawn a session straight into the idle pool and only call when a permit is free"""
     await _slots.acquire()
     try:
         session = await _spawn()
@@ -289,8 +292,8 @@ async def _maintain() -> None:
         now = time.monotonic()
         to_kill: list[Session] = []
         async with _pool_lock:
-            # keep the most-recently-idle up to target, plus anything still within the grace
-            # window (a filler session cycling between renders), and trim the rest
+            # keep the most-recently-idle up to target plus anything still within the grace
+            # window like a filler session cycling between renders and trim the rest
             _idle.sort(key=lambda item: item[1], reverse=True)
             kept: list[tuple[Session, float]] = []
             for session, since in _idle:
@@ -298,12 +301,12 @@ async def _maintain() -> None:
                     kept.append((session, since))
                 else:
                     to_kill.append(session)
-            _idle[:] = kept  # in-place so `_idle` stays the module global
+            _idle[:] = kept  # in-place so _idle stays the module global
             deficit = target - len(_idle)
         for session in to_kill:
             await _kill(session)
             _slots.release()
-        # top up toward the target, one per tick, only if a permit is free (don't block)
+        # top up toward the target one per tick only if a permit is free without blocking
         if deficit > 0 and not _slots.locked():
             try:
                 await _warm_one()
@@ -313,7 +316,7 @@ async def _maintain() -> None:
 
 
 def _quote(token: str) -> str:
-    # nxsk strips quotes as pure grouping, so quoting everything is safe and handles spaces
+    # nxsk strips quotes as pure grouping so quoting everything is safe and handles spaces
     return '"' + token + '"'
 
 
@@ -328,10 +331,11 @@ async def render(
     default_settings: bool = True,
     timeout: float | None = 180.0,
 ) -> Path:
-    """Export `chart` (.json.gz) to `output` as MP4. `cover`/`bgm` are optional files nxsk
-    classifies by extension (a .png cover, an audio bgm). `crf` is the per-render libx264
-    quality (0-51, lower = better/larger); `default_settings` starts from built-in defaults
-    so a render doesn't inherit a previous request's state."""
+    """export chart (.json.gz) to output as mp4
+    cover and bgm are optional files nxsk classifies by extension, a png cover and an audio bgm
+    crf is the per-render libx264 quality from 0-51 where lower is better and larger
+    default_settings starts from built-in defaults so a render doesn't inherit prior state
+    """
     output.parent.mkdir(parents=True, exist_ok=True)
     tokens = [str(chart)]
     if settings is not None:
@@ -358,11 +362,11 @@ async def render(
                 raise ChartPreviewError(-1, "renderer closed unexpectedly")
             line = raw.decode("utf-8", "replace").rstrip("\r\n")
             if line.startswith("OK "):
-                healthy = True  # in sync; keep the session
+                healthy = True  # in sync so keep the session
                 session.renders += 1
                 return output
             if line.startswith("ERR "):
-                healthy = True  # clean reply, still in sync
+                healthy = True  # clean reply still in sync
                 session.renders += 1
                 raise ChartPreviewError(1, line[4:])
     except (
@@ -371,8 +375,8 @@ async def render(
         BrokenPipeError,
         ConnectionResetError,
     ) as exc:
-        # mid-render or broken pipe: the session is desynced, so it's dropped (healthy stays
-        # False), or the next request on it would read this one's late reply
+        # mid-render or broken pipe means the session is desynced so it's dropped with healthy
+        # left False, otherwise the next request on it would read this one's late reply
         if isinstance(exc, asyncio.TimeoutError):
             raise ChartPreviewError(-1, f"render timed out after {timeout}s") from None
         if isinstance(exc, asyncio.CancelledError):
@@ -383,8 +387,8 @@ async def render(
 
 
 async def start() -> None:
-    """Start the maintenance loop (which warms sessions per the warm_source). Best-effort:
-    if the binary is absent it does nothing and renders fall back."""
+    """start the maintenance loop which warms sessions per the warm_source
+    best-effort so if the binary is absent it does nothing and renders fall back"""
     global _maintain_task
     if not available():
         return
@@ -393,8 +397,9 @@ async def start() -> None:
 
 
 async def stop() -> None:
-    """Stop maintenance and shut every idle session down. In-flight renders drop their own
-    sessions when cancelled, so this only sweeps the idle pool."""
+    """stop maintenance and shut every idle session down
+    in-flight renders drop their own sessions when cancelled so this only sweeps the idle pool
+    """
     global _maintain_task
     if _maintain_task is not None:
         _maintain_task.cancel()
@@ -415,4 +420,4 @@ async def stop() -> None:
                 await asyncio.wait_for(process.wait(), 5.0)
             except (asyncio.TimeoutError, BrokenPipeError, ConnectionResetError):
                 await _kill(session)
-        _slots.release()  # idle sessions hold a permit for life; free it now
+        _slots.release()  # idle sessions hold a permit for life so free it now

@@ -12,7 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from data.pjsk import character_display_name
+from data.pjsk import RARITY_DISPLAY, character_display_name
 from data.song_equivalents import equivalents_of, songs_equivalent
 from database.queries import GUESS_LEADERBOARD_PER_PAGE
 from helpers import converters, embeds, tools, unblock
@@ -32,26 +32,57 @@ MODE_TIME = {
     "character_bw": 30,
     "chart": 90,
     "chart_append": 90,
+    "chart_expert": 90,
     "music": 300,
 }
 GUESS_PREFIX = "-"
-# appended to every "not found" / "wrong guess" reply
+# appended to every not-found or wrong-guess reply
 GUESS_TIP = "\n-# Use `-hint` for a hint, `-end` to give up, or `-time` for time left!"
-# music mode's variant - a hint reveals more of the song rather than a fact
+# music mode variant where a hint reveals more of the song rather than a fact
 MUSIC_TIP = "\n-# Use `-hint` to provide more of the song, or `-time` for time left!"
 # a music hint can't fire within this many seconds of the previous one
 MUSIC_HINT_COOLDOWN = 5.0
+# non-music modes get three cumulative text hints and the last reveals this fraction of the
+# name's characters at random
+MAX_TEXT_HINTS = 3
+SONG_REVEAL_FRACTION = 1 / 4
+EVENT_REVEAL_FRACTION = 1 / 5
+
+
+def _masked_name(name: str, fraction: float) -> str:
+    """name with a random fraction of its non-space characters shown and the rest as
+    underscores with spaces kept like __a__b__c d_ e__"""
+    positions = [i for i, ch in enumerate(name) if not ch.isspace()]
+    if not positions:
+        return name
+    count = max(1, round(len(positions) * fraction))
+    revealed = set(random.sample(positions, min(count, len(positions))))
+    return "".join(
+        ch if (ch.isspace() or i in revealed) else "_" for i, ch in enumerate(name)
+    )
+
+
 # players must let at least this fraction of the round elapse before they can give up
+# music rounds are 5 minutes so they use a smaller fraction 1/15 which is 20s
 GIVEUP_FRACTION = 1 / 3
-# a round whose build never finished (task cancelled, a fetch hung) sits with startTime=None
-# forever, holding its image bytes and locking the channel - reap it once it's this stale
+MUSIC_GIVEUP_FRACTION = 1 / 15
+
+
+def _giveup_seconds(mode: str) -> float:
+    frac = MUSIC_GIVEUP_FRACTION if mode == "music" else GIVEUP_FRACTION
+    return MODE_TIME.get(mode, GUESS_TIME) * frac
+
+
+# a round whose build never finished from a cancelled task or hung fetch sits with startTime
+# None forever holding its image bytes and locking the channel so reap it once it's this stale
 PENDING_ROUND_TIMEOUT = 300
 _ASSET_ATTEMPTS = 5
 
-# A bare number is matched as a song *id*, which collides with songs whose actual title is
-# that number. When a guess of the plain number lands on the id-sharing song, nudge the
-# guesser toward the one they probably meant. Keyed by (typed text, matched song id) ->
-# (intended song's name, how to type it). Mirrors old Sbotga's hardcoded list.
+# a bare number is matched as a song id which collides with songs whose actual title is that
+# number, so when a guess of the plain number lands on the id-sharing song nudge the guesser
+# toward the one they probably meant
+# keyed by (typed text, matched song id) to (intended song name, how to type it)
+# mirrors old sbotga's hardcoded list
 _ID_COLLISION_HINTS: dict[tuple[str, int], tuple[str, str]] = {
     ("88", 88): ("88☆彡", "88s or 224"),
     ("1", 1): ("「１」", "[1] or 132"),
@@ -69,12 +100,19 @@ def _id_collision_hint(content: str, music: Any) -> str:
     )
 
 
-_CHART_CLIP_ATTEMPTS = 3  # capped lower: each attempt may render a video
+def _egg_block(descriptions: list[str]) -> str:
+    """the bold EASTER EGG! banner with one bullet per triggered egg for the chart message"""
+    if not descriptions:
+        return ""
+    return "**EASTER EGG!**\n" + "\n".join(f"- {d}" for d in descriptions) + "\n\n"
+
+
+_CHART_CLIP_ATTEMPTS = 3  # capped lower since each attempt may render a video
 _BAD_FILENAME_CHARS = set('\\/:*?"<>|')
 
 
 def _safe_filename(name: str) -> str:
-    """A song title trimmed to something safe for an upload filename."""
+    """a song title trimmed to something safe for an upload filename"""
     cleaned = "".join(
         c for c in name if c not in _BAD_FILENAME_CHARS and c >= " "
     ).strip()
@@ -97,7 +135,7 @@ class GuessCog(commands.Cog):
         self.check_guess_task.start()
 
     async def cog_load(self) -> None:
-        # warm the render server, then keep the clip cache topped up in the background
+        # warm the render server then keep the clip cache topped up in the background
         async def _boot() -> None:
             chart_preview.cleanup_orphans()  # kill renderer processes a prior crash leaked
             await chart_preview.start()
@@ -146,7 +184,7 @@ class GuessCog(commands.Cog):
         return random.choice(events) if events else None
 
     # --- pickers that reroll past a missing asset ---
-    # some entries are permanently unrenderable (unmirrored jackets, cards without trained art)
+    # some entries are permanently unrenderable like unmirrored jackets or cards without trained art
 
     async def _pick_song_jacket(self):
         for _ in range(_ASSET_ATTEMPTS):
@@ -158,15 +196,13 @@ class GuessCog(commands.Cog):
                 return music, jacket
         return None
 
-    async def _pick_chart_image(self, has_append: bool):
-        # fallback when the clip renderer isn't installed: the old cropped-chart round
+    async def _pick_chart_image(self, mode: str):
+        # fallback when the clip renderer isn't installed using the old cropped-chart round
+        difficulty = chart_clip.DIFFICULTIES[mode]
         for _ in range(_ASSET_ATTEMPTS):
-            music = self._random_song(
-                has_append=has_append, needs_master=not has_append
-            )
+            music = chart_clip.weighted_chart_music(self.bot.pjsk.musics(), difficulty)  # type: ignore[union-attr]
             if not music:
                 return None
-            difficulty = "append" if has_append else "master"
             region = next((r for r in self.bot.pjsk.regions_for_music(music.id) if r in ("en", "jp")), "en")  # type: ignore[union-attr]
             try:
                 png = await self.bot.sbuga.get_chart_image(music.id, difficulty, region, mirrored=False)  # type: ignore[union-attr,arg-type]
@@ -189,57 +225,57 @@ class GuessCog(commands.Cog):
         except SbugaError:
             return None
 
-    async def _pick_chart_clip(self, has_append: bool):
-        """(music, clip mp4, reveal png, difficulty, answer video | None)."""
-        gtype = "chart_append" if has_append else "chart"
-        # grab a pre-rendered (higher quality) clip instantly if one is cached
-        cached = chart_cache.pop(gtype)
+    async def _pick_chart_clip(self, mode: str):
+        """returns music, clip mp4, reveal png, difficulty, answer video or none, egg descriptions
+        mode is one of chart chart_append or chart_expert"""
+        # grab a pre-rendered higher quality clip instantly if one is cached
+        cached = chart_cache.pop(mode)
         if cached:
             clip, answer, meta = cached
             music = self.bot.pjsk.get_music(meta["music_id"])  # type: ignore[union-attr]
             if music:
                 png = await self._chart_reveal_png(music.id, meta["diff"])
-                return music, clip, png, meta["diff"], answer
-        # nothing cached: render on the fly, smaller/faster, live-priority.
-        # on-the-fly has no answer video (the audio must not leak during the round).
+                return music, clip, png, meta["diff"], answer, meta.get("eggs", [])
+        # nothing cached so render on the fly smaller and faster with live-priority
+        # on-the-fly has no answer video since the audio must not leak during the round
         with chart_cache.live_priority():
-            return await self._render_chart_clip_live(has_append)
+            return await self._render_chart_clip_live(mode)
 
-    async def _render_chart_clip_live(self, has_append: bool):
+    async def _render_chart_clip_live(self, mode: str):
+        difficulty = chart_clip.DIFFICULTIES[mode]
         for _ in range(_CHART_CLIP_ATTEMPTS):
-            music = self._random_song(
-                has_append=has_append, needs_master=not has_append
-            )
+            music = chart_clip.weighted_chart_music(self.bot.pjsk.musics(), difficulty)  # type: ignore[union-attr]
             if not music:
                 return None
-            difficulty = "append" if has_append else "master"
             region = next((r for r in self.bot.pjsk.regions_for_music(music.id) if r in ("en", "jp")), "en")  # type: ignore[union-attr]
             sus_text = await self._fetch_chart_sus(music.id, difficulty, region)
             if not sus_text:
                 continue
             try:
-                clip = await chart_clip.render_clip(
+                result = await chart_clip.render_clip(
                     sus_text,
                     height=chart_clip.LIVE_HEIGHT,
                     fps=chart_clip.LIVE_FPS,
                 )
             except chart_clip.ChartClipError as exc:
-                # a render failure is a renderer problem, not a chart one - bail so the
-                # caller falls back to the cropped image instead of retrying identically
+                # a render failure is a renderer problem not a chart one so bail and let the
+                # caller fall back to the cropped image instead of retrying identically
                 self.bot.warn(
                     f"chart clip render failed ({music.id} {difficulty}): {exc}"
                 )
                 return None
-            if not clip:
-                continue
+            if result is None:
+                continue  # no usable window in this chart
+            clip, eggs = result
             png = await self._chart_reveal_png(music.id, difficulty)
-            return music, clip, png, difficulty, None
+            return music, clip, png, difficulty, None, eggs
         return None
 
     async def _pick_music(self):
-        """(music, full song audio, nosil url, window start seconds, jacket | None). Rerolls
-        past songs with no nosil audio or too short to place a window. None if nothing usable.
-        The audio is only used to cut the small stage clips; it isn't kept on the round.
+        """returns music, full song audio, nosil url, window start seconds, jacket or none
+        rerolls past songs with no nosil audio or too short to place a window and returns none
+        if nothing is usable
+        the audio is only used to cut the small stage clips and isn't kept on the round
         """
         for _ in range(_ASSET_ATTEMPTS):
             music = self._random_song()
@@ -259,8 +295,8 @@ class GuessCog(commands.Cog):
         return None
 
     async def _gen_music_clips(self, data: dict, audio: bytes, start: float) -> None:
-        """Cut the longer stage clips in the background while the player listens to stage 1,
-        so only a few KB of clips are held (not the whole song)."""
+        """cut the longer stage clips in the background while the player listens to stage 1
+        so only a few kb of clips are held rather than the whole song"""
         for stage in range(2, song_clip.MAX_STAGE + 1):
             try:
                 data["clips"][stage] = await song_clip.stage_clip(audio, start, stage)
@@ -276,7 +312,9 @@ class GuessCog(commands.Cog):
                 random.randint(0, 1)
             )
             if trained and not card.card_url_trained:
-                trained = False  # no trained art; don't claim it in the reveal or hint
+                trained = (
+                    False  # no trained art so don't claim it in the reveal or hint
+                )
             url = card.card_url_trained if trained else card.card_url_normal
             art = await _fetch_bytes(url) if url else None
             if art:
@@ -326,13 +364,13 @@ class GuessCog(commands.Cog):
                 embed=embeds.error_embed("I couldn't get this channel.")
             )
             return False
-        # Guesses are read from chat, so the bot must actually be able to see
-        # this channel - user installs can run commands in places it can't.
+        # guesses are read from chat so the bot must actually be able to see this
+        # channel, user installs can run commands in places it can't
         if interaction.guild is not None:
-            # is_guild_integration() only proves the app is installed here; an
-            # applications.commands-only install has no bot member, so on_message
-            # never fires. guild.me is None in that case (and on the partial guild
-            # a user install falls back to).
+            # is_guild_integration() only proves the app is installed here, an
+            # applications.commands-only install has no bot member so on_message
+            # never fires and guild.me is none in that case and on the partial guild
+            # a user install falls back to
             me = interaction.guild.me if interaction.is_guild_integration() else None
             if me is None:
                 await interaction.followup.send(
@@ -419,7 +457,7 @@ class GuessCog(commands.Cog):
             )
             kwargs["video"] = True
         if data["guessing"] == "music" and data["data"].get("audio_url"):
-            # reveal the full song alongside the jacket (re-fetched, not held)
+            # reveal the full song alongside the jacket which is re-fetched not held
             audio = await _fetch_bytes(data["data"]["audio_url"])
             if audio:
                 name = _safe_filename(str(data["answerName"]))
@@ -434,7 +472,7 @@ class GuessCog(commands.Cog):
         now = time.time()
         for channel_id, data in list(self.bot.cache.guess_channels.items()):
             if not data["startTime"]:
-                # never started (build cancelled / a fetch hung): reap once clearly orphaned
+                # never started from a cancelled build or hung fetch so reap once clearly orphaned
                 if now - data.get("createdAt", now) > PENDING_ROUND_TIMEOUT:
                     self.remove_guess(self.bot, channel_id)
                 continue
@@ -488,7 +526,7 @@ class GuessCog(commands.Cog):
         if not content:
             return
 
-        # "-hint" / "-end" / "-time" (any case, any spacing) run those instead of guessing
+        # -hint -end or -time in any case or spacing run those instead of guessing
         command = "".join(content.lower().split())
         if command == "hint":
             await self._chat_hint(message, data)
@@ -500,6 +538,8 @@ class GuessCog(commands.Cog):
             await message.reply(embed=self._time_embed(data))
             return
 
+        # a real guess attempt so record the guesser and let them -end
+        data.setdefault("guessers", set()).add(message.author.id)
         if data["guessType"] == "song":
             await self._check_song(message, data, content)
         elif data["guessType"] == "character":
@@ -625,7 +665,7 @@ class GuessCog(commands.Cog):
             return
 
         guess: dict[str, Any] = {
-            "guessed": [],
+            "guessers": set(),  # user ids who've made a guess and are needed to give up
             "channel": interaction.channel,
             "id": tools.generate_secure_string(25),
             "guessType": None,
@@ -638,10 +678,10 @@ class GuessCog(commands.Cog):
             "data": {},
         }
         self.bot.cache.guess_channels[interaction.channel.id] = guess  # type: ignore[union-attr]
-        # a chart round with no cached clip renders one on the fly (several seconds); show a
-        # placeholder so the channel is visibly locked, then edit it in. startTime only
-        # begins after the edit, so the timer and guessing wait for the chart to appear.
-        is_chart = mode in ("chart", "chart_append")
+        # a chart round with no cached clip renders one on the fly over several seconds so show
+        # a placeholder to visibly lock the channel then edit it in
+        # startTime only begins after the edit so the timer and guessing wait for the chart
+        is_chart = mode in ("chart", "chart_append", "chart_expert")
         rendering_live = is_chart and chart_cache.count(mode) == 0
         try:
             if rendering_live:
@@ -663,6 +703,13 @@ class GuessCog(commands.Cog):
                 else:
                     await interaction.followup.send(embed=err)
                 return
+            if (
+                embed.description
+            ):  # note when giving up unlocks and it also needs all hints used
+                embed.description = (
+                    f"-# You can give up in `{int(_giveup_seconds(mode))}` seconds "
+                    "(after all hints are used).\n" + embed.description
+                )
             if is_chart:
                 await interaction.edit_original_response(
                     embed=embed, attachments=[file] if file else []
@@ -702,7 +749,7 @@ class GuessCog(commands.Cog):
             if jacket:
                 guess["answer_file_path"] = io.BytesIO(jacket)
             data = guess["data"]
-            data["audio_url"] = url  # re-fetched only for the reveal, never held
+            data["audio_url"] = url  # re-fetched only for the reveal never held
             data["start"] = start
             data["stage"] = 1
             data["last_hint"] = 0.0
@@ -730,12 +777,12 @@ class GuessCog(commands.Cog):
             "notes",
             "chart",
             "chart_append",
+            "chart_expert",
         ):
             guess["guessType"] = "song"
-            has_append = mode == "chart_append"
 
             if mode == "notes":
-                # three append-only entries carry no master chart at all
+                # three append-only entries carry no master chart
                 music = self._random_song(needs_master=True)
                 if not music:
                     return None, None
@@ -755,31 +802,34 @@ class GuessCog(commands.Cog):
                 )
                 return embed, None
 
-            if mode in ("chart", "chart_append"):
+            if mode in ("chart", "chart_append", "chart_expert"):
                 clip_hit = (
-                    await self._pick_chart_clip(has_append)
+                    await self._pick_chart_clip(mode)
                     if chart_preview.available()
                     else None
                 )
                 if clip_hit:
-                    music, clip, png, diff, answer_video = clip_hit
+                    music, clip, png, diff, answer_video, eggs = clip_hit
                     guess["answer"] = music.id
                     guess["answerName"] = music.title
-                    if png:  # reveal (/guess end) still shows the full chart
+                    if png:  # reveal via -end still shows the full chart
                         guess["answer_file_path"] = io.BytesIO(png)
-                    if answer_video:  # cached clips also reveal a jacket+audio video
+                    if (
+                        answer_video
+                    ):  # cached clips also reveal a jacket and audio video
                         guess["data"]["answer_video"] = answer_video
                     embed = embeds.embed(
                         title="Guess The Chart", color=discord.Color.dark_gold()
                     )
                     embed.description = (
-                        f"Guess the song from a ~10 second {diff} chart clip.\n"
+                        _egg_block(eggs)
+                        + f"Guess the song from a ~10 second {diff} chart clip.\n"
                         f"Use `{GUESS_PREFIX}your guess` to guess, `{GUESS_PREFIX}hint` for a hint, `{GUESS_PREFIX}end` to give up, or `{GUESS_PREFIX}time` for time left. You have {secs} seconds."
                     )
                     return embed, discord.File(io.BytesIO(clip), "chart.mp4")
 
-                # renderer missing/broken or no clip available: cropped chart image
-                hit = await self._pick_chart_image(has_append)
+                # renderer missing or broken or no clip available so use the cropped chart image
+                hit = await self._pick_chart_image(mode)
                 if not hit:
                     return None, None
                 music, png, diff = hit
@@ -847,6 +897,8 @@ class GuessCog(commands.Cog):
             guess["data"]["card_name"] = self.bot.pjsk.card_display_name(card, use_emojis=True, trained=trained)  # type: ignore[union-attr]
             guess["data"]["card_id"] = card.id
             guess["data"]["trained"] = trained
+            guess["data"]["rarity"] = card.card_rarity_type
+            guess["data"]["attr"] = card.attr
             cropped = await unblock.to_process_with_timeout(
                 _crop_square, art, 250, mode == "character_bw"
             )
@@ -934,6 +986,12 @@ class GuessCog(commands.Cog):
         await self.handle_guess(interaction, "chart_append")
 
     @guess.command(
+        name="chart_expert", description="Guess the song from an Expert chart clip."
+    )
+    async def chart_expert(self, interaction: discord.Interaction) -> None:
+        await self.handle_guess(interaction, "chart_expert")
+
+    @guess.command(
         name="event", description="Guess the event from a cropped background."
     )
     async def event(self, interaction: discord.Interaction) -> None:
@@ -950,39 +1008,57 @@ class GuessCog(commands.Cog):
         await self.handle_guess(interaction, "music")
 
     async def _resolve_end(
-        self, channel_id: int
+        self, channel_id: int, user_id: int
     ) -> tuple[discord.Embed, list[discord.File], "_GuessResultView | None"]:
-        """Build the reply for ending a round. A non-None view means the round was actually
-        ended (attach it); a None view means it's an error reply (no active guess / too soon
-        to give up)."""
+        """build the reply for ending a round
+        a non-none view means the round was actually ended so attach it, a none view means it's
+        an error reply like no active guess or too soon to give up"""
         data = self.bot.cache.guess_channels.get(channel_id)
         if not data:
             return embeds.error_embed("There's no active guess here."), [], None
+        # you can only give up on a round you've actually tried which curbs drive-by trolling
+        if user_id not in data.get("guessers", ()):
+            return (
+                embeds.error_embed(
+                    "You must make at least one guess before giving up."
+                ),
+                [],
+                None,
+            )
+        # can't give up until enough time has passed and every hint has been used
         if data["guessing"] == "music":
-            # can't give up until the whole song has been revealed (stage 4)
-            if data["data"].get("stage", 1) < song_clip.MAX_STAGE:
-                return (
-                    embeds.error_embed(
-                        "You can't give up yet - use `-hint` until you've heard the "
-                        "full song."
-                    ),
-                    [],
-                    None,
-                )
+            hints_done = data["data"].get("stage", 1) >= song_clip.MAX_STAGE
         else:
-            started = data.get("startTime")
-            if started:
-                max_time = MODE_TIME.get(data["guessing"], GUESS_TIME)
-                remaining = started + max_time * GIVEUP_FRACTION - time.time()
-                if remaining > 0:
-                    return (
-                        embeds.error_embed(
-                            f"You can't give up yet - wait `{math.ceil(remaining)}` "
-                            "more seconds."
-                        ),
-                        [],
-                        None,
-                    )
+            hints_done = data["data"].get("hint_stage", 0) >= MAX_TEXT_HINTS
+        started = data.get("startTime")
+        remaining = 0.0
+        if started:
+            remaining = started + _giveup_seconds(data["guessing"]) - time.time()
+        if not hints_done and remaining > 0:
+            return (
+                embeds.error_embed(
+                    "Cannot end the guess until all hints are revealed and "
+                    f"`{math.ceil(remaining)}` more seconds pass."
+                ),
+                [],
+                None,
+            )
+        if not hints_done:
+            return (
+                embeds.error_embed(
+                    "Cannot end the guess until all hints are revealed."
+                ),
+                [],
+                None,
+            )
+        if remaining > 0:
+            return (
+                embeds.error_embed(
+                    f"Cannot end the guess for another `{math.ceil(remaining)}` seconds."
+                ),
+                [],
+                None,
+            )
         self.remove_guess(self.bot, channel_id)
         embed = embeds.embed(
             title="Guess Ended",
@@ -999,7 +1075,7 @@ class GuessCog(commands.Cog):
     @guess.command(name="end", description="End the active guess in this channel.")
     async def end(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(thinking=True)
-        embed, files, view = await self._resolve_end(interaction.channel.id)  # type: ignore[union-attr]
+        embed, files, view = await self._resolve_end(interaction.channel.id, interaction.user.id)  # type: ignore[union-attr]
         msg = await interaction.followup.send(
             embed=embed, files=files, view=view or discord.utils.MISSING
         )
@@ -1007,7 +1083,9 @@ class GuessCog(commands.Cog):
             view.message = msg
 
     async def _chat_end(self, message: discord.Message, data: dict) -> None:
-        embed, files, view = await self._resolve_end(message.channel.id)
+        embed, files, view = await self._resolve_end(
+            message.channel.id, message.author.id
+        )
         msg = await message.reply(
             embed=embed, files=files, view=view or discord.utils.MISSING
         )
@@ -1042,23 +1120,22 @@ class GuessCog(commands.Cog):
             return
         await interaction.followup.send(embed=self._time_embed(data))
 
-    def _master_level(self, song_id: int) -> int | None:
-        # append-only entries (388) carry no master chart, so fall back to the
-        # song they're a copy of
+    def _diff_level(self, song_id: int, difficulty: str = "master") -> int | None:
+        # append-only entries carry no master chart so fall back to the song they're a copy of
         for candidate in (song_id, *sorted(equivalents_of(song_id))):
             music = self.bot.pjsk.get_music(candidate)  # type: ignore[union-attr]
             if not music:
                 continue
-            master = next(
-                (d for d in music.difficulties if d.difficulty == "master"), None
+            diff = next(
+                (d for d in music.difficulties if d.difficulty == difficulty), None
             )
-            if master:
-                return master.play_level
+            if diff:
+                return diff.play_level
         return None
 
     async def _music_clip(self, d: dict, stage: int) -> bytes | None:
-        """The stage clip: from the pre-generated cache, else wait for the background cutter,
-        else re-fetch the song and cut this one."""
+        """the stage clip from the pre-generated cache
+        else wait for the background cutter else re-fetch the song and cut this one"""
         clip = d["clips"].get(stage)
         if clip is not None:
             return clip
@@ -1073,7 +1150,7 @@ class GuessCog(commands.Cog):
                 return clip
         audio = await _fetch_bytes(
             d["audio_url"]
-        )  # background cut failed; do it once now
+        )  # background cut failed so do it once now
         if not audio:
             return None
         try:
@@ -1086,7 +1163,7 @@ class GuessCog(commands.Cog):
     async def _music_hint(
         self, data: dict
     ) -> tuple[discord.Embed, list[discord.File], bool]:
-        """Music hints reveal a longer prefix of the clip (stage 1→4), rate-limited."""
+        """music hints reveal a longer prefix of the clip from stage 1 to 4 and are rate-limited"""
         d = data["data"]
         stage = d.get("stage", 1)
         if stage >= song_clip.MAX_STAGE:
@@ -1127,80 +1204,100 @@ class GuessCog(commands.Cog):
             True,
         )
 
+    async def _tier_lines(
+        self, data: dict, stage: int
+    ) -> tuple[list[str], list[discord.File]]:
+        """the cumulative hint content for tiers 1 to stage of a non-music round
+        the masked name is computed once and stored so it stays stable across re-hints
+        """
+        d = data["data"]
+        name = str(data["answerName"])
+        lines: list[str] = []
+        files: list[discord.File] = []
+        if data["guessType"] == "song":
+            if stage >= 1:
+                # chart modes hint their own difficulty and other song modes use master
+                diff = chart_clip.DIFFICULTIES.get(data["guessing"], "master")
+                level = self._diff_level(data["answer"], diff)
+                if level is None:
+                    lines.append(f"This song doesn't have a {diff.title()} chart.")
+                else:
+                    lines.append(
+                        f"The song is level **`{level}`** on "
+                        f"{emojis.difficulty_colors[diff]} **{diff.title()}** (on JP server)."
+                    )
+            if stage >= 2:
+                lines.append(f"The name has **`{len(name)}`** characters.")
+            if stage >= 3:
+                d.setdefault("masked", _masked_name(name, SONG_REVEAL_FRACTION))
+                lines.append(f"Name: `{d['masked']}`")
+        elif data["guessType"] == "character":
+            if stage >= 1:
+                state = "trained" if d.get("trained") else "not trained"
+                lines.append(f"This card is **`{state}`**.")
+            if stage >= 2:
+                rarity = RARITY_DISPLAY.get(d.get("rarity", ""), "?")
+                lines.append(f"The rarity of this card is **{rarity}**.")
+            if stage >= 3:
+                attr = d.get("attr")
+                icon = emojis.attributes.get(attr, "") if attr else ""
+                lines.append(
+                    f"The attribute of this card is {icon} **{(attr or 'unknown').title()}**."
+                )
+        elif data["guessType"] == "event":
+            if stage >= 1:
+                if "hint_art" not in d:
+                    event = self.bot.pjsk.get_event(data["answer"])  # type: ignore[union-attr]
+                    d["hint_art"] = (
+                        await _fetch_bytes(event.character_url)
+                        if event and event.character_url
+                        else None
+                    )
+                if d["hint_art"]:
+                    files.append(discord.File(io.BytesIO(d["hint_art"]), "image.png"))
+                lines.append("Here is a character featured in this event.")
+            if stage >= 2:
+                lines.append(f"The name has **`{len(name)}`** characters.")
+            if stage >= 3:
+                d.setdefault("masked", _masked_name(name, EVENT_REVEAL_FRACTION))
+                lines.append(f"Name: `{d['masked']}`")
+        return lines, files
+
     async def _resolve_hint(
         self, data: dict
     ) -> tuple[discord.Embed, list[discord.File], bool]:
-        """Build the hint reply. The bool is whether it counts as a hint used (a real hint,
-        not an error/unsupported reply)."""
+        """build the hint reply where the bool is whether it counts as a hint used
+        non-music modes give three cumulative text hints and each reply repeats every tier
+        revealed so far"""
         if data["guessing"] == "music":
             return await self._music_hint(data)
-        files: list[discord.File] = []
-        if data["guessType"] == "song":
-            level = self._master_level(data["answer"])
-            if level is None:
-                # append-only songs have no Master to give a level for
-                return (
-                    embeds.embed(
-                        title="Guess Hint",
-                        description="This song doesn't have a Master chart.",
-                        color=discord.Color.red(),
-                    ),
-                    files,
-                    True,
-                )
+        if data["guessType"] not in ("song", "character", "event"):
             return (
                 embeds.embed(
-                    title="Guess Hint",
-                    description=(
-                        f"The song is level **`{level}`** (after any rerates) on "
-                        f"{emojis.difficulty_colors['master']} **Master**."
-                    ),
+                    title="Unsupported Hint",
+                    description="Ongoing guess does not support hints.",
                     color=discord.Color.red(),
                 ),
-                files,
-                True,
+                [],
+                False,
             )
-        if data["guessType"] == "character":
-            trained = "trained" if data["data"]["trained"] else "not trained"
-            return (
-                embeds.embed(
-                    title="Guess Hint",
-                    description=f"The character card is **`{trained}`**.",
-                    color=discord.Color.red(),
-                ),
-                files,
-                True,
-            )
-        if data["guessType"] == "event":
-            event = self.bot.pjsk.get_event(data["answer"])  # type: ignore[union-attr]
-            art = (
-                await _fetch_bytes(event.character_url)
-                if event and event.character_url
-                else None
-            )
-            if not art:
-                return (
-                    embeds.error_embed("I couldn't load a hint for this event."),
-                    files,
-                    False,
-                )
-            embed = embeds.embed(
-                title="Guess Hint",
-                description="Here is a character featured in this event.",
-                color=discord.Color.red(),
-            )
-            embed.set_image(url="attachment://image.png")
-            files.append(discord.File(io.BytesIO(art), "image.png"))
-            return embed, files, True
-        return (
-            embeds.embed(
-                title="Unsupported Hint",
-                description="Ongoing guess does not support hints.",
-                color=discord.Color.red(),
-            ),
-            files,
-            False,
+        d = data["data"]
+        stage = d.get("hint_stage", 0)
+        advanced = stage < MAX_TEXT_HINTS
+        if advanced:
+            stage += 1
+            d["hint_stage"] = stage
+        lines, files = await self._tier_lines(data, stage)
+        if not advanced:
+            lines.append("-# All hints have been revealed.")
+        embed = embeds.embed(
+            title=f"Guess Hint - Stage {stage}/{MAX_TEXT_HINTS}",
+            description="\n".join(lines),
+            color=discord.Color.red(),
         )
+        if any(f.filename == "image.png" for f in files):
+            embed.set_image(url="attachment://image.png")
+        return embed, files, advanced
 
     @guess.command(name="hint", description="Get a hint for the active guess.")
     async def hint(self, interaction: discord.Interaction) -> None:
@@ -1307,9 +1404,9 @@ class GuessCog(commands.Cog):
 
 
 class _GuessResultView(SbugaView):
-    """Buttons on a finished guess: Play Again, plus type-specific info buttons
-    (song -> Song Info/Song Aliases, character -> View Card/Character Info).
-    Each info button just reuses the existing slash command's callback."""
+    """buttons on a finished guess, play again plus type-specific info buttons
+    song gets song info and song aliases, character gets view card and character info
+    each info button just reuses the existing slash command's callback"""
 
     def __init__(self, cog: "GuessCog", data: dict) -> None:
         super().__init__(timeout=15)  # matches the original bot's button timeout
@@ -1334,8 +1431,8 @@ class _GuessResultView(SbugaView):
         self.add_item(button)
 
     async def _spend(self, interaction: discord.Interaction, item) -> None:
-        """Disable the clicked button via a plain message edit, leaving the
-        interaction unresponded so the command callback can defer normally."""
+        """disable the clicked button via a plain message edit leaving the interaction
+        unresponded so the command callback can defer normally"""
         item.disabled = True
         try:
             if interaction.message:

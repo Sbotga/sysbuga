@@ -1,13 +1,12 @@
-"""Pre-render chart-guess clips to disk so a round can grab one instantly.
+"""pre-render chart-guess clips to disk so a round can grab one instantly
 
-A background worker keeps up to chart_clip.TARGETS[type] clips per chart type on disk,
-rendering at the cached (higher) quality whenever a pool is below target and no live render
-is waiting.
-A round pops one instantly; if the pool is empty it renders on the fly (smaller/faster).
-Clips are stored non-mirrored, so a user with mirror on always renders live.
+a background worker keeps up to chart_clip.TARGETS[type] clips per chart type on disk and
+renders at the cached higher quality whenever a pool is below target and no live render is
+waiting. a round pops one instantly, or renders on the fly (smaller and faster) if the pool
+is empty.
 
-Each entry is a folder (chart.mp4 + answer.mp4 + meta.json); it only counts once meta.json's
-"complete" flag is written and the folder is atomically renamed into place. Multi-process
+each entry is a folder with chart.mp4 answer.mp4 and meta.json, and only counts once meta's
+"complete" flag is written and the folder is atomically renamed into place. multi-process
 safe: store() publishes with an atomic rename, pop() claims one the same way, and
 cleanup_invalid() drops anything a crash left half-generated.
 """
@@ -32,24 +31,33 @@ if TYPE_CHECKING:
     from data.pjsk import PJSKData
 
 CACHE_ROOT = Path("cache/chart_clips")
-TYPES = tuple(chart_clip.TARGETS)  # ("chart", "chart_append")
+TYPES = tuple(chart_clip.TARGETS)  # chart, chart_append, chart_expert
 _POLL_SECONDS = 10.0
+# how many different chart clips the filler renders at once
+# each still renders its chart and answer one after another so it holds one nxsk session
+# needs a spare session in chart_preview.MAX_SESSIONS for on-the-fly rounds
+FILL_CONCURRENCY = 2
 
 _task: "asyncio.Task | None" = None
 _pjsk: "PJSKData | None" = None
 _running = False
-# on-the-fly renders in flight; the filler pauses while any are waiting so a live round
-# doesn't queue behind cache-fill work
+# on-the-fly renders in flight
+# the filler pauses while any are waiting so a live round doesn't queue behind fill work
 _live_pending = 0
-# this-process generation stats (the filler runs in the bot)
-_stats = {"generated": 0, "seconds": 0.0}
+# this-process generation stats since the filler runs in the bot
+# clip_seconds sums each render's own duration
+# wall_seconds sums the batch wall time which is lower per clip thanks to concurrency
+_stats = {"generated": 0, "clip_seconds": 0.0, "wall_seconds": 0.0}
 
 
 def stats() -> dict[str, Any]:
     n = _stats["generated"]
     return {
         "generated": n,
-        "avg_seconds": (_stats["seconds"] / n) if n else 0.0,
+        "avg_one_clip": (
+            (_stats["clip_seconds"] / n) if n else 0.0
+        ),  # one render's duration
+        "avg_per_clip": (_stats["wall_seconds"] / n) if n else 0.0,  # concurrency-aware
         "pools": {t: (count(t), chart_clip.TARGETS[t]) for t in TYPES},
     }
 
@@ -58,15 +66,15 @@ def _dir(gtype: str) -> Path:
     return CACHE_ROOT / gtype
 
 
-# each entry is a folder holding chart.mp4 + answer.mp4 + meta.json; the "_" prefix hides
-# an entry still being written (_tmp_) or mid-pop (_claim_) from count()/pop()
+# each entry is a folder with chart.mp4 answer.mp4 and meta.json
+# the "_" prefix hides an entry still being written (_tmp_) or mid-pop (_claim_) from count and pop
 def _entries(d: Path) -> "list[Path]":
     return [e for e in d.iterdir() if e.is_dir() and not e.name.startswith("_")]
 
 
 def _valid(entry: Path) -> "dict[str, Any] | None":
-    """The entry's meta if it's fully generated (both clips present, json flagged
-    complete), else None. meta.json is written last, so its flag means done."""
+    """the entry's meta if it's fully generated with both clips present and json flagged
+    complete, else none. meta.json is written last so its flag means done"""
     try:
         meta = json.loads((entry / "meta.json").read_text("utf-8"))
     except (OSError, ValueError):
@@ -79,8 +87,8 @@ def _valid(entry: Path) -> "dict[str, Any] | None":
 
 
 def cleanup_invalid() -> None:
-    """Delete entries a crash/shutdown left half-generated (and any _tmp_/_claim_ leftovers).
-    Run once at startup in the filler process, before the worker or any pop."""
+    """delete entries a crash or shutdown left half-generated plus any _tmp_ or _claim_ leftovers
+    run once at startup in the filler process before the worker or any pop"""
     for gtype in TYPES:
         d = _dir(gtype)
         if not d.exists():
@@ -98,14 +106,14 @@ def count(gtype: str) -> int:
 
 
 def pop(gtype: str) -> "tuple[bytes, bytes | None, dict[str, Any]] | None":
-    """Atomically claim one cached entry. Returns (chart mp4, answer mp4, meta)."""
+    """atomically claim one cached entry, returns (chart mp4, answer mp4, meta)"""
     d = _dir(gtype)
     if not d.exists():
         return None
     for entry in sorted(_entries(d)):
         claim = d / f"_claim_{entry.name}"
         try:
-            os.rename(entry, claim)  # atomic — whoever wins the rename owns the entry
+            os.rename(entry, claim)  # atomic and whoever wins the rename owns the entry
         except OSError:
             continue  # another process took it
         meta = _valid(claim)
@@ -132,13 +140,13 @@ def _store(
     tmp.mkdir()
     (tmp / "chart.mp4").write_bytes(chart_mp4)
     (tmp / "answer.mp4").write_bytes(answer_mp4)
-    # meta.json written last, with the flag that signals the whole entry is done
+    # meta.json written last with the flag that signals the whole entry is done
     (tmp / "meta.json").write_text(json.dumps({**meta, "complete": True}), "utf-8")
     os.rename(tmp, d / uid)  # atomic publish
 
 
 class live_priority:
-    """Mark an on-the-fly render in progress so the filler yields to it."""
+    """mark an on-the-fly render in progress so the filler yields to it"""
 
     def __enter__(self) -> "live_priority":
         global _live_pending
@@ -150,12 +158,12 @@ class live_priority:
         _live_pending -= 1
 
 
-# the reveal audio, best available in this order
+# the reveal audio best available in this order
 _VOCAL_PRIORITY = ("instrumental", "sekai", "virtual_singer")
 
 
 def _pick_bgm_url(music: Any) -> str | None:
-    # trimmed (silence-removed) audio, so it lines up with the chart's time coordinate
+    # trimmed silence-removed audio so it lines up with the chart's time coordinate
     def url(v: Any) -> str | None:
         return v.bgm_nosil_url or v.bgm_url
 
@@ -171,7 +179,7 @@ def _pick_bgm_url(music: Any) -> str | None:
 
 
 def _png_jacket_url(url: str) -> str:
-    # nxsk's image loader can't decode webp; the .png variant sits beside it on R2
+    # nxsk's image loader can't decode webp so use the .png variant beside it on r2
     return url.rsplit(".", 1)[0] + ".png"
 
 
@@ -183,14 +191,10 @@ async def _fetch_bytes(url: str) -> bytes | None:
 
 async def _render_one(gtype: str) -> bool:
     assert _pjsk is not None
-    has_append = gtype == "chart_append"
-    want = "append" if has_append else "master"
-    musics = [
-        m for m in _pjsk.musics() if any(d.difficulty == want for d in m.difficulties)
-    ]
-    if not musics:
+    want = chart_clip.DIFFICULTIES[gtype]
+    music = chart_clip.weighted_chart_music(_pjsk.musics(), want)
+    if music is None:
         return False
-    music = random.choice(musics)
     region = next(
         (r for r in _pjsk.regions_for_music(music.id) if r in ("en", "jp")), "en"
     )
@@ -203,8 +207,8 @@ async def _render_one(gtype: str) -> bool:
     if window is None:
         return False
 
-    # an entry needs both the chart clip and the reveal video; skip the song if the audio
-    # or jacket isn't available (the reveal is mandatory for a cached entry)
+    # an entry needs both the chart clip and the reveal video
+    # skip the song if the audio or jacket isn't available since the reveal is mandatory
     bgm_url = _pick_bgm_url(music)
     if not bgm_url or not music.jacket_url:
         return False
@@ -213,13 +217,16 @@ async def _render_one(gtype: str) -> bool:
     if not bgm or not jacket:
         return False
 
-    # render the two clips one after another so the always-on filler only ever holds a
-    # single nxsk session, leaving the other free for on-the-fly rounds
+    # roll easter eggs once so the guess clip and its reveal share the same overrides
+    egg_settings, egg_descriptions = chart_clip.roll_easter_eggs()
+
+    # render the two clips one after another so each filler slot only holds one nxsk session
     try:
         chart_mp4 = await chart_clip.render_leveldata(
             window,
             height=chart_clip.CACHED_HEIGHT,
             fps=chart_clip.CACHED_FPS,
+            extra_settings=egg_settings,
         )
         answer_mp4 = await chart_clip.render_answer_video(
             window,
@@ -227,12 +234,42 @@ async def _render_one(gtype: str) -> bool:
             bgm,
             height=chart_clip.CACHED_HEIGHT,
             fps=chart_clip.CACHED_FPS,
+            extra_settings=egg_settings,
         )
     except chart_clip.ChartClipError:
         return False
 
-    _store(gtype, chart_mp4, answer_mp4, {"music_id": music.id, "diff": want})
+    _store(
+        gtype,
+        chart_mp4,
+        answer_mp4,
+        {"music_id": music.id, "diff": want, "eggs": egg_descriptions},
+    )
     return True
+
+
+async def _timed_render(gtype: str) -> tuple[bool, float]:
+    started = time.perf_counter()
+    try:
+        ok = await _render_one(gtype)
+    except Exception:
+        ok = False
+    return ok, time.perf_counter() - started
+
+
+def _fill_targets(n: int) -> list[str]:
+    """up to n pools to render this batch biased to the least-rendered so the pools grow
+    together, the same pool can repeat when only it is below target"""
+    counts = {t: count(t) for t in TYPES if count(t) < chart_clip.TARGETS[t]}
+    targets: list[str] = []
+    for _ in range(n):
+        if not counts:
+            break
+        fewest = min(counts.values())
+        pool = random.choice([t for t in counts if counts[t] == fewest])
+        targets.append(pool)
+        counts[pool] += 1  # pretend it's rendered so the next pick balances
+    return targets
 
 
 async def _worker() -> None:
@@ -240,23 +277,26 @@ async def _worker() -> None:
         if not chart_preview.available() or _live_pending:
             await asyncio.sleep(_POLL_SECONDS)
             continue
-        # fill the least-rendered pool; on a tie pick randomly, so they grow together
-        candidates = [t for t in TYPES if count(t) < chart_clip.TARGETS[t]]
-        if not candidates:
+        targets = _fill_targets(FILL_CONCURRENCY)
+        if not targets:
             await asyncio.sleep(_POLL_SECONDS)  # all pools full
             continue
-        fewest = min(count(t) for t in candidates)
-        target = random.choice([t for t in candidates if count(t) == fewest])
-        started = time.perf_counter()
-        try:
-            ok = await _render_one(target)
-        except Exception:
-            ok = False
-        if ok:
-            _stats["generated"] += 1
-            _stats["seconds"] += time.perf_counter() - started
+        # render FILL_CONCURRENCY different clips at once each with its own nxsk session
+        batch_start = time.perf_counter()
+        results = await asyncio.gather(*[_timed_render(t) for t in targets])
+        batch_wall = time.perf_counter() - batch_start
+        made = 0
+        for ok, dur in results:
+            if ok:
+                made += 1
+                _stats["generated"] += 1
+                _stats["clip_seconds"] += dur  # one render's own duration
+        if made:
+            _stats["wall_seconds"] += batch_wall  # wall time shared across the batch
         else:
-            await asyncio.sleep(_POLL_SECONDS)  # missing SUS / renderer down: back off
+            await asyncio.sleep(
+                _POLL_SECONDS
+            )  # missing sus or renderer down so back off
 
 
 def _empty_pools() -> int:
@@ -264,10 +304,10 @@ def _empty_pools() -> int:
 
 
 def start(pjsk: "PJSKData") -> None:
-    """Begin filling the cache in the background. Only one process should do this."""
+    """begin filling the cache in the background, only one process should do this"""
     global _pjsk, _running, _task
     _pjsk = pjsk
-    # keep a session warm per empty pool, so an on-the-fly render for a drained type is ready
+    # keep a session warm per empty pool so an on-the-fly render for a drained type is ready
     chart_preview.set_warm_source(_empty_pools)
     if _task and not _task.done():
         return

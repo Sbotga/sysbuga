@@ -22,14 +22,18 @@ from fastapi import (
 from pydantic import BaseModel
 
 from cogs.guessing import (
-    GIVEUP_FRACTION,
+    EVENT_REVEAL_FRACTION,
     GUESS_TIME,
+    MAX_TEXT_HINTS,
     MODE_TIME,
     MUSIC_HINT_COOLDOWN,
+    SONG_REVEAL_FRACTION,
     _fetch_bytes,
+    _giveup_seconds,
+    _masked_name,
 )
 from helpers.imaging import _crop_chart, _crop_square
-from data.pjsk import character_display_name
+from data.pjsk import RARITY_DISPLAY, character_display_name
 from data.search import preprocess
 from data.song_equivalents import songs_equivalent
 from helpers import converters, unblock
@@ -52,6 +56,7 @@ MODES: dict[str, str] = {
     "notes": "Note Count",
     "chart": "Chart",
     "chart_append": "Chart (Append)",
+    "chart_expert": "Chart (Expert)",
     "character": "Character",
     "character_bw": "Character (grayscale)",
     "event": "Event",
@@ -60,7 +65,7 @@ MODES: dict[str, str] = {
 
 router = APIRouter(prefix="/api/activity")
 
-# small per-worker cache for proxied avatars (they rarely change and are tiny)
+# small per-worker cache for proxied avatars which rarely change and are tiny
 _avatar_cache: "OrderedDict[str, bytes]" = OrderedDict()
 _AVATAR_MAX = 256
 
@@ -120,10 +125,20 @@ async def _safe_fetch(url: str) -> bytes | None:
         return None
 
 
+def _song_hint(music: Any, mode: str) -> dict[str, Any]:
+    diff = chart_clip.DIFFICULTIES.get(mode, "master")
+    d = next((x for x in music.difficulties if x.difficulty == diff), None)
+    return {"level": d.play_level if d else None, "difficulty": diff}
+
+
+def _egg_prompt(descriptions: list[str]) -> str:
+    return "EASTER EGG! " + " ".join(descriptions)
+
+
 async def _build_round(
     pjsk: "PJSKData", sbuga: "SbugaClient", mode: str
 ) -> dict[str, Any] | None:
-    """Round payload mirroring GuessCog._build_round, minus Discord bits."""
+    """round payload mirroring GuessCog._build_round minus discord bits"""
     now_ms = int(time.time() * 1000)
     round_data: dict[str, Any] = {
         "mode": mode,
@@ -156,8 +171,8 @@ async def _build_round(
             round_data["reveal"] = await _safe_fetch(music.jacket_url)
             round_data["image"] = clip
             round_data["image_media"] = "audio/mpeg"
-            round_data["audio_url"] = url  # re-fetched for the reveal, never stored
-            round_data["audio"] = audio  # only to pre-cut the stages, not persisted
+            round_data["audio_url"] = url  # re-fetched for the reveal never stored
+            round_data["audio"] = audio  # only to pre-cut the stages not persisted
             round_data["start"] = start
             round_data["stage"] = 1
             round_data["prompt"] = (
@@ -175,22 +190,24 @@ async def _build_round(
         "notes",
         "chart",
         "chart_append",
+        "chart_expert",
     ):
-        musics = [
-            m
-            for m in pjsk.musics()
-            if mode != "chart_append"
-            or any(d.difficulty == "append" for d in m.difficulties)
-        ]
-        if not musics:
+        if mode in ("chart", "chart_append", "chart_expert"):
+            # weight chart selection by play level like the bot's cache filler
+            music = chart_clip.weighted_chart_music(
+                pjsk.musics(), chart_clip.DIFFICULTIES[mode]
+            )
+        else:
+            music = random.choice(pjsk.musics())
+        if music is None:
             return None
-        music = random.choice(musics)
         round_data["type"] = "song"
         round_data["answer_id"] = music.id
         round_data["answer_name"] = music.title
+        round_data["hint"] = _song_hint(music, mode)
 
         jacket = await _safe_fetch(music.jacket_url)
-        round_data["reveal"] = jacket  # full jacket shown on reveal, all song modes
+        round_data["reveal"] = jacket  # full jacket shown on reveal for all song modes
 
         if mode == "notes":
             master = next(
@@ -203,10 +220,10 @@ async def _build_round(
             )
             return round_data
 
-        if mode in ("chart", "chart_append"):
-            diff = "append" if mode == "chart_append" else "master"
-            # a pre-rendered clip (shared with the bot) plays instantly; its answer is the
-            # cached song, not the one randomly picked above
+        if mode in ("chart", "chart_append", "chart_expert"):
+            diff = chart_clip.DIFFICULTIES[mode]
+            # a pre-rendered clip shared with the bot plays instantly and its answer is the
+            # cached song not the one randomly picked above
             cached = chart_cache.pop(mode)
             if cached:
                 mp4, _answer, meta = cached  # activity doesn't surface the answer video
@@ -214,9 +231,12 @@ async def _build_round(
                 if cm:
                     round_data["answer_id"] = cm.id
                     round_data["answer_name"] = cm.title
+                    round_data["hint"] = _song_hint(cm, mode)
                     round_data["reveal"] = await _safe_fetch(cm.jacket_url)
                     round_data["image"] = mp4
                     round_data["image_media"] = "video/mp4"
+                    if meta.get("eggs"):
+                        round_data["prompt"] = _egg_prompt(meta["eggs"])
                     return round_data
             region = next(
                 (r for r in pjsk.regions_for_music(music.id) if r in ("en", "jp")),
@@ -227,13 +247,19 @@ async def _build_round(
                 sus = await _safe_fetch(pjsk.chart_source_url(music.id, diff, region))
                 if sus:
                     try:
-                        clip = await chart_clip.render_clip(
+                        rendered = await chart_clip.render_clip(
                             sus.decode("utf-8", "replace"),
                             height=chart_clip.LIVE_HEIGHT,
                             fps=chart_clip.LIVE_FPS,
                         )
                     except chart_clip.ChartClipError:
-                        clip = None  # renderer missing/broken: fall back to the crop
+                        rendered = (
+                            None  # renderer missing or broken so fall back to the crop
+                        )
+                    if rendered:
+                        clip, eggs = rendered
+                        if eggs:
+                            round_data["prompt"] = _egg_prompt(eggs)
             if clip:
                 round_data["image"] = clip
                 round_data["image_media"] = "video/mp4"
@@ -287,6 +313,11 @@ async def _build_round(
         round_data["type"] = "character"
         round_data["answer_id"] = char.id
         round_data["answer_name"] = character_display_name(char)
+        round_data["hint"] = {
+            "trained": trained,
+            "rarity": card.card_rarity_type,
+            "attr": card.attr,
+        }
         round_data["reveal"] = art
         round_data["image"] = (
             await unblock.to_process_with_timeout(
@@ -311,6 +342,7 @@ async def _build_round(
         round_data["type"] = "event"
         round_data["answer_id"] = event.id
         round_data["answer_name"] = event.name
+        round_data["hint"] = {"character_url": event.character_url}
         round_data["reveal"] = bg
         round_data["image"] = (
             await unblock.to_process_with_timeout(_crop_square, bg, 250, False)
@@ -321,8 +353,8 @@ async def _build_round(
 
 
 def _match(pjsk: "PJSKData", round_data: dict[str, Any], guess: str):
-    """(id, display name, matched key). The key is the alias the query actually hit;
-    it's the display name itself for non-song rounds."""
+    """returns id, display name, matched key where the key is the alias the query actually hit
+    and it's the display name itself for non-song rounds"""
     if round_data["type"] == "song":
         hit = converters.match_song_with_key(pjsk, guess)
         return (hit[0].id, hit[0].title, hit[1]) if hit else None
@@ -350,13 +382,16 @@ def _meta(
         "user_id": user_id,
         "finished": False,
     }
-    if "stage" in round_data:  # music mode: track hint progression
+    if "stage" in round_data:  # music mode tracks audio-clip progression
         meta["stage"] = round_data["stage"]
         meta["max_stage"] = song_clip.MAX_STAGE
         meta["last_hint"] = 0.0
         meta["start"] = round_data["start"]
         meta["audio_url"] = round_data["audio_url"]  # re-fetched for the reveal
         meta["has_full"] = bool(round_data.get("audio_url"))
+    else:  # everything else uses cumulative tiered text hints
+        meta["hint"] = round_data.get("hint") or {}
+        meta["hint_stage"] = 0
     return meta
 
 
@@ -434,12 +469,15 @@ async def start_round(
         "image_media": meta["image_media"],
         "has_reveal": meta["has_reveal"],
         "expires_at": expires_at,
-        "giveup_at": now + max_time * GIVEUP_FRACTION,
+        "giveup_at": now + _giveup_seconds(body.mode),
     }
     if "stage" in meta:  # music mode
         resp["stage"] = meta["stage"]
         resp["max_stage"] = meta["max_stage"]
         resp["has_full"] = meta.get("has_full", False)
+    else:  # tiered text hints where give-up needs all of them used
+        resp["hint_stage"] = 0
+        resp["max_hints"] = MAX_TEXT_HINTS
     return resp
 
 
@@ -463,8 +501,8 @@ async def round_reveal(round_id: str) -> Response:
 
 @router.get("/guess/round/{round_id}/full")
 async def round_full(round_id: str) -> Response:
-    """The whole song audio, shown on a music round's reveal - re-fetched from its url so we
-    never keep the megabytes around."""
+    """the whole song audio shown on a music round's reveal
+    re-fetched from its url so we never keep the megabytes around"""
     meta = await redis_state.get_round(round_id)
     url = (meta or {}).get("audio_url")
     audio = await _safe_fetch(url) if url else None
@@ -474,8 +512,8 @@ async def round_full(round_id: str) -> Response:
 
 
 async def _pregen_music_stages(round_id: str, audio: bytes, start: float) -> None:
-    """Cut the longer stage clips in the background and stash them, so hints are instant and
-    the whole song isn't kept in memory."""
+    """cut the longer stage clips in the background and stash them so hints are instant and
+    the whole song isn't kept in memory"""
     for stage in range(2, song_clip.MAX_STAGE + 1):
         try:
             clip = await song_clip.stage_clip(audio, start, stage)
@@ -497,11 +535,77 @@ async def hint(
     user_data = _user_data(request.app.state)
     if meta["mode"] == "music":
         return await _music_hint(body.round_id, meta, user_id, user_data)
+    return await _tiered_hint(body.round_id, meta, user_id, user_data)
+
+
+def _tier_content(meta: dict[str, Any], stage: int) -> tuple[list[str], str | None]:
+    """cumulative hint lines for tiers 1 to stage plus an image url on event stage 1 only
+    the masked name is computed once and stored on meta so it stays stable"""
     name = str(meta["answer_name"])
-    masked = name[0] + "".join("_" if c != " " else " " for c in name[1:])
-    if user_data:
-        await user_data.add_guesses(user_id, meta["mode"], "hint")
-    return {"hint": masked, "length": len(name)}
+    h = meta.get("hint") or {}
+    lines: list[str] = []
+    image: str | None = None
+    t = meta["type"]
+    if t == "song":
+        if stage >= 1:
+            lvl = h.get("level")
+            diff = str(h.get("difficulty", "master")).title()
+            lines.append(
+                f"This song doesn't have a {diff} chart."
+                if lvl is None
+                else f"The song is level {lvl} on {diff} (on JP server)."
+            )
+        if stage >= 2:
+            lines.append(f"The name has {len(name)} characters.")
+        if stage >= 3:
+            meta.setdefault("masked", _masked_name(name, SONG_REVEAL_FRACTION))
+            lines.append(f"Name: {meta['masked']}")
+    elif t == "character":
+        if stage >= 1:
+            lines.append(
+                f"This card is {'trained' if h.get('trained') else 'not trained'}."
+            )
+        if stage >= 2:
+            lines.append(
+                f"The rarity of this card is {RARITY_DISPLAY.get(h.get('rarity', ''), '?')}."
+            )
+        if stage >= 3:
+            attr = h.get("attr")
+            lines.append(
+                f"The attribute of this card is {(attr or 'unknown').title()}."
+            )
+    elif t == "event":
+        if stage >= 1:
+            image = h.get("character_url")
+            lines.append("Here is a character featured in this event.")
+        if stage >= 2:
+            lines.append(f"The name has {len(name)} characters.")
+        if stage >= 3:
+            meta.setdefault("masked", _masked_name(name, EVENT_REVEAL_FRACTION))
+            lines.append(f"Name: {meta['masked']}")
+    return lines, image
+
+
+async def _tiered_hint(
+    round_id: str, meta: dict[str, Any], user_id: int, user_data: "UserData | None"
+) -> dict[str, Any]:
+    stage = meta.get("hint_stage", 0)
+    advanced = stage < MAX_TEXT_HINTS
+    if advanced:
+        stage += 1
+        meta["hint_stage"] = stage
+    lines, image = _tier_content(meta, stage)
+    if advanced:
+        await redis_state.update_round(round_id, meta)
+        if user_data:
+            await user_data.add_guesses(user_id, meta["mode"], "hint")
+    return {
+        "stage": stage,
+        "max_stage": MAX_TEXT_HINTS,
+        "lines": lines,
+        "image": image,
+        "advanced": advanced,
+    }
 
 
 async def _music_hint(
@@ -522,7 +626,7 @@ async def _music_hint(
             status_code=429, detail="Please wait a moment before the next hint."
         )
     stage += 1
-    # the pre-generated clip if it's ready, else re-fetch the song and cut this one
+    # the pre-generated clip if it's ready else re-fetch the song and cut this one
     clip = await redis_state.get_round_stage(round_id, stage)
     if not clip:
         audio = await _safe_fetch(meta.get("audio_url"))
@@ -548,30 +652,39 @@ async def reveal_answer(
     body: RoundBody,
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """End a round without a correct guess (timer ran out). No stat recorded,
-    matching chat guessing where timeouts don't count."""
+    """end a round without a correct guess when the timer ran out
+    no stat recorded matching chat guessing where timeouts don't count"""
     user_id = await _resolve_user(authorization)
     meta = await redis_state.get_round(body.round_id)
     if not meta or meta["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="no active round")
+    # can't give up until enough time has passed and every hint has been used
     if meta["mode"] == "music":
-        # can't give up until the whole song is revealed (stage 4)
-        if meta.get("stage", 1) < song_clip.MAX_STAGE:
-            raise HTTPException(
-                status_code=403,
-                detail="You can't give up yet - use hints until you've heard the full song.",
-            )
+        hints_done = meta.get("stage", 1) >= song_clip.MAX_STAGE
     else:
-        # can't give up until at least 1/3 of the round has elapsed
-        started = meta.get("started_at")
-        if started is not None:
-            max_time = MODE_TIME.get(meta["mode"], GUESS_TIME)
-            remaining = started + max_time * GIVEUP_FRACTION - time.time()
-            if remaining > 0:
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"You can't give up yet - wait {math.ceil(remaining)} more seconds.",
-                )
+        hints_done = meta.get("hint_stage", 0) >= MAX_TEXT_HINTS
+    started = meta.get("started_at")
+    remaining = 0.0
+    if started is not None:
+        remaining = started + _giveup_seconds(meta["mode"]) - time.time()
+    if not hints_done and remaining > 0:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Cannot end the guess until all hints are revealed and "
+                f"{math.ceil(remaining)} more seconds pass."
+            ),
+        )
+    if not hints_done:
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot end the guess until all hints are revealed.",
+        )
+    if remaining > 0:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Cannot end the guess for another {math.ceil(remaining)} seconds.",
+        )
     await redis_state.finish_round(body.round_id, user_id)
     return {"answer": meta["answer_name"], "has_reveal": meta["has_reveal"]}
 
@@ -620,14 +733,14 @@ async def submit_guess(
         return resp
     if user_data:
         await user_data.add_guesses(user_id, meta["mode"], "fail")
-    # matched_key is the alias the guess actually hit; omitted when it is the name
+    # matched_key is the alias the guess actually hit and omitted when it is the name
     resp: dict[str, Any] = {"result": "incorrect", "matched": matched[1]}
     if preprocess(matched[2]) != preprocess(matched[1]):
         resp["matched_key"] = matched[2]
     return resp
 
 
-# --- avatar proxy (activities can't load cdn.discordapp.com directly) -------
+# --- avatar proxy since activities can't load cdn.discordapp.com directly -------
 
 
 def _avatar_path(user_id: int, avatar_hash: str | None) -> str:

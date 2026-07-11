@@ -16,6 +16,7 @@ GUESSING_TYPES = {
     "Character Black and White": "character_bw",
     "Chart": "chart",
     "Chart Append": "chart_append",
+    "Chart Expert": "chart_expert",
     "Event": "event",
     "Song Note Count": "notes",
     "Music": "music",

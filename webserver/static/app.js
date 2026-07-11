@@ -1,8 +1,8 @@
 import { DiscordSDK } from "./vendor/discord-sdk.js";
 import { startRain, startTrail } from "./sbuga.js";
 
-// Inside the activity iframe all XHR/fetch goes through Discord's proxy
-// prefix; hit directly (testing), the server has no such prefix.
+// inside the activity iframe all xhr/fetch goes through discord's proxy
+// prefix, hit directly in testing where the server has no such prefix
 const EMBEDDED =
   location.hostname.endsWith("discordsays.com") ||
   new URLSearchParams(location.search).has("frame_id");
@@ -29,7 +29,7 @@ let instanceId = ""; // discord activity instance id (the room key)
 let roomMembers = []; // [{id, name, avatar, active}] everyone connected to this instance
 let spectateTarget = null; // id we're currently watching, or null
 let spectateName = ""; // display name of the current/last spectate target
-let pendingSpectate = null; // target that left; auto-resume if they rejoin
+let pendingSpectate = null; // target that left, auto-resume if they rejoin
 let spectateTimerHandle = null;
 let hubClosing = false;
 let heartbeatHandle = null;
@@ -129,9 +129,9 @@ function bootError(msg) {
   $("loading-error").textContent = msg;
 }
 
-// `prompt: "none"` returns a code silently for already-authorized users (no
-// consent screen each launch); fall back to the interactive consent the first
-// time, when there's nothing to silently reuse.
+// prompt: "none" returns a code silently for already-authorized users with no
+// consent screen each launch, so fall back to the interactive consent the first
+// time when there's nothing to silently reuse
 async function authorize(sdk, clientId) {
   const params = {
     client_id: clientId,
@@ -209,23 +209,33 @@ function stopTimer() {
   timerHandle = null;
 }
 
-// the give-up button stays disabled until 1/3 of the round has elapsed (giveup_at)
+// give-up unlocks only once enough time has passed (giveup_at) and every hint is used
+// while the timer is still running the button counts down
+function refreshGiveup() {
+  const btn = $("btn-giveup");
+  if (!currentRound) return;
+  const secsLeft = currentRound.giveup_at
+    ? currentRound.giveup_at - Date.now() / 1000
+    : 0;
+  const timeOk = secsLeft <= 0;
+  const hintsOk =
+    currentRound.mode === "music"
+      ? (currentRound.stage || 1) >= (currentRound.max_stage || 4)
+      : (currentRound.hints_used || 0) >= (currentRound.max_hints || 0);
+  btn.disabled = !(timeOk && hintsOk);
+  btn.textContent = timeOk ? "Give up" : `Give up (${Math.ceil(secsLeft)}s)`;
+  btn.title = btn.disabled
+    ? timeOk
+      ? "Use every hint to give up."
+      : "Give up unlocks after the timer and once every hint is used."
+    : "";
+}
+
 function armGiveup(giveupAt) {
   disarmGiveup();
-  const btn = $("btn-giveup");
-  const ready = () => {
-    btn.disabled = false;
-    btn.title = "";
-    giveupHandle = null;
-  };
+  refreshGiveup();
   const wait = giveupAt ? giveupAt - Date.now() / 1000 : 0;
-  if (wait <= 0) {
-    ready();
-    return;
-  }
-  btn.disabled = true;
-  btn.title = "You can't give up yet.";
-  giveupHandle = setTimeout(ready, wait * 1000);
+  if (wait > 0) giveupHandle = setTimeout(refreshGiveup, wait * 1000);
 }
 
 function disarmGiveup() {
@@ -241,6 +251,7 @@ function startTimer(expiresAt) {
     const left = Math.max(0, expiresAt - Date.now() / 1000);
     el.textContent = `${Math.ceil(left)}s`;
     el.classList.toggle("low", left <= 10);
+    refreshGiveup(); // live give-up countdown
     if (left <= 0) {
       stopTimer();
       timeUp();
@@ -262,12 +273,20 @@ function setFormEnabled(on) {
   $("btn-hint").disabled = !on;
 }
 
-function appendLog(logEl, icon, text, cls) {
+function appendLog(logEl, icon, text, cls, image) {
   const li = document.createElement("li");
   li.className = cls;
   li.innerHTML = `<span class="marker"></span><span class="text"></span>`;
   li.querySelector(".marker").textContent = icon;
-  li.querySelector(".text").textContent = text;
+  const textEl = li.querySelector(".text");
+  textEl.textContent = text || "";
+  if (image) {
+    const img = document.createElement("img");
+    img.alt = "hint";
+    img.src = image;
+    img.style.cssText = "display:block;max-width:150px;border-radius:6px;margin-top:4px";
+    textEl.append(img);
+  }
   logEl.append(li);
   logEl.scrollTop = logEl.scrollHeight;
 }
@@ -276,6 +295,13 @@ function appendLog(logEl, icon, text, cls) {
 function playerLog(icon, text, cls) {
   const entry = { marker: icon, text, cls };
   appendLog($("guess-log"), icon, text, cls);
+  myGuessLog.push(entry);
+  hubSend({ op: "log", entry });
+}
+
+function playerLogImage(url) {
+  const entry = { marker: "💡", text: "", cls: "hint", image: url };
+  appendLog($("guess-log"), "💡", "", "hint", url);
   myGuessLog.push(entry);
   hubSend({ op: "log", entry });
 }
@@ -378,15 +404,8 @@ async function startRound(mode) {
   }
   setFormEnabled(true);
   $("btn-giveup").hidden = false;
-  if (round.mode === "music") {
-    // give-up unlocks only once the whole song is revealed (stage 4), not on a timer
-    disarmGiveup();
-    const btn = $("btn-giveup");
-    btn.disabled = round.stage < round.max_stage;
-    btn.title = btn.disabled ? "Reveal the full song first (use hints)." : "";
-  } else {
-    armGiveup(round.giveup_at);
-  }
+  currentRound.hints_used = 0; // tiered modes track this while music tracks stage
+  armGiveup(round.giveup_at); // unlocks on time and all hints via refreshGiveup
   $("guess-input").focus();
   startTimer(round.expires_at);
   lastRoundPayload = {
@@ -416,7 +435,7 @@ function showReveal(round, message, cls) {
   $("btn-again").hidden = false;
   // the guess log stays visible after the reveal on purpose
   if (round.has_reveal) {
-    clearVideo($("round-video")); // reveal image is a jacket / full chart
+    clearVideo($("round-video")); // reveal image is a jacket or full chart
     const img = $("round-image");
     img.src = `${API}/api/activity/guess/round/${round.round_id}/reveal`;
     img.hidden = false;
@@ -424,7 +443,7 @@ function showReveal(round, message, cls) {
     clearRoundMedia("round-image", "round-video");
   }
   if (round.has_full) {
-    // music reveal: play the whole song alongside the jacket
+    // music reveal plays the whole song alongside the jacket
     const audio = $("round-audio");
     audio.src = `${API}/api/activity/guess/round/${round.round_id}/full`;
     audio.hidden = false;
@@ -459,7 +478,7 @@ async function submitGuess(event) {
   }
 
   if (result.result === "correct") {
-    // show what they typed, and what it resolved to when that differs (an alias)
+    // show what they typed and what it resolved to when that differs like an alias
     const text = guess === result.answer ? guess : `${guess} → ${result.answer}`;
     playerLog("✅", text, "right");
     const msg =
@@ -470,8 +489,8 @@ async function submitGuess(event) {
   } else if (result.result === "expired") {
     showReveal({ ...currentRound, ...result }, `Time's up! It was ${result.answer}.`, "bad");
   } else if (result.result === "incorrect") {
-    // their guess, the song it landed on, and the alias that matched (when the
-    // alias isn't just the song's own name)
+    // their guess, the song it landed on, and the alias that matched when the
+    // alias isn't just the song's own name
     const landed = result.matched_key
       ? `${result.matched} (${result.matched_key})`
       : result.matched;
@@ -514,7 +533,7 @@ async function giveUp() {
     });
     showReveal({ ...round, ...res }, `You gave up. It was ${res.answer}.`, "bad");
   } catch (e) {
-    // server rejected the give-up (e.g. the 1/3 gate) - keep the round going
+    // server rejected the give-up like the 1/3 gate so keep the round going
     setResult(e.message, "bad");
   }
 }
@@ -528,8 +547,18 @@ async function useHint() {
       method: "POST",
       body: JSON.stringify({ round_id: currentRound.round_id }),
     });
-    if (res.stage !== undefined) {
-      // music mode: a hint reveals a longer clip
+    if (res.lines !== undefined) {
+      // tiered text hint where the log already holds prior tiers so show just the newest
+      if (!res.advanced) {
+        setResult("All hints have been revealed.", "");
+      } else {
+        playerLog("💡", res.lines[res.stage - 1] || "", "hint");
+        if (res.image && res.stage === 1) playerLogImage(res.image);
+        if (currentRound) currentRound.hints_used = res.stage;
+        refreshGiveup();
+      }
+    } else if (res.stage !== undefined) {
+      // music mode where a hint reveals a longer clip
       if (res.already) {
         playerLog("💡", `Stage ${res.stage}/${res.max_stage} - the full song is already provided.`, "hint");
       } else {
@@ -539,12 +568,7 @@ async function useHint() {
         audio.play().catch(() => {});
         playerLog("💡", `Stage ${res.stage}/${res.max_stage} - ${res.seconds}s of the song`, "hint");
         if (currentRound) currentRound.stage = res.stage;
-        if (res.stage >= res.max_stage) {
-          // full song revealed: give-up is now allowed
-          const btn = $("btn-giveup");
-          btn.disabled = false;
-          btn.title = "";
-        }
+        refreshGiveup();
       }
     } else {
       playerLog("💡", `${res.hint}  (${res.length} chars)`, "hint");
@@ -589,9 +613,9 @@ function connectHub() {
       name: selfName,
       avatar: selfAvatar,
     });
-    // a reconnect re-runs join() server-side, which resets us to empty/not-playing,
-    // so replay exactly what we're doing: watching someone, and/or our current round
-    // (incl. the play-again screen, where lastRoundPayload is set but currentRound isn't)
+    // a reconnect re-runs join() server-side which resets us to empty and not-playing
+    // so replay exactly what we're doing, watching someone and our current round
+    // including the play-again screen where lastRoundPayload is set but currentRound isn't
     if (spectateTarget) hubSend({ op: "watch", target: spectateTarget });
     if (lastRoundPayload) {
       hubSend({ op: "round", round: lastRoundPayload });
@@ -618,8 +642,8 @@ function connectHub() {
   hubWs.addEventListener("error", () => {});
 }
 
-// keep the socket alive through Cloudflare/nginx idle timeouts (unknown ops are
-// ignored server-side); the reconnect loop covers us if a drop slips through
+// keep the socket alive through cloudflare or nginx idle timeouts, unknown ops are
+// ignored server-side and the reconnect loop covers us if a drop slips through
 function startHeartbeat() {
   stopHeartbeat();
   heartbeatHandle = setInterval(() => hubSend({ op: "ping" }), 30000);
@@ -652,7 +676,7 @@ function onHubMessage(msg) {
       if (spectateTarget === msg.from) spectateTyping(msg.text);
       break;
     case "log":
-      if (spectateTarget === msg.from) appendLog($("spectate-log"), msg.entry.marker, msg.entry.text, msg.entry.cls);
+      if (spectateTarget === msg.from) appendLog($("spectate-log"), msg.entry.marker, msg.entry.text, msg.entry.cls, msg.entry.image);
       break;
     case "result":
       if (spectateTarget === msg.from) spectateResult(msg.result);
@@ -694,8 +718,8 @@ function throttleTyping(text) {
   }
 }
 
-// best-effort SDK presence: satisfies "see everyone in this activity" and gives us
-// a name/avatar fallback. The websocket room stays the authoritative watch list.
+// best-effort sdk presence that satisfies "see everyone in this activity" and gives us
+// a name or avatar fallback, the websocket room stays the authoritative watch list
 async function initPresence(sdk) {
   const apply = (list) => {
     for (const p of list || []) {
@@ -760,7 +784,7 @@ function renderSpectateList() {
     const li = document.createElement("li");
     const btn = document.createElement("button");
     btn.className = m.active ? "spectate-item" : "spectate-item idle";
-    // clickable even when idle - you'll watch them and auto-switch to their round
+    // clickable even when idle so you'll watch them and auto-switch to their round
     // the moment they start playing
     btn.innerHTML =
       `<img alt="" /><span class="who"><span class="name"></span><span class="mode"></span></span>`;
@@ -836,7 +860,7 @@ function renderSnapshot(state) {
     return;
   }
   applySpectateRound(state.round);
-  for (const e of state.log || []) appendLog($("spectate-log"), e.marker, e.text, e.cls);
+  for (const e of state.log || []) appendLog($("spectate-log"), e.marker, e.text, e.cls, e.image);
   spectateTyping(state.typing || "");
   if (state.result) spectateResult(state.result);
 }
@@ -930,7 +954,7 @@ $("btn-quit").addEventListener("click", async () => {
     lastRoundPayload = null;
     myGuessLog = [];
     myResult = null;
-    hubSend({ op: "clear" }); // already revealed - stop broadcasting the finished round
+    hubSend({ op: "clear" }); // already revealed so stop broadcasting the finished round
     return show("setup");
   }
   if (await confirmModal("Quit this round?", "Quit", "Keep playing")) {
@@ -953,12 +977,12 @@ $("spectate-modal").addEventListener("click", (e) => {
 });
 $("spectate-stop").addEventListener("click", stopSpectating);
 $("spectate-gone-back").addEventListener("click", () => {
-  pendingSpectate = null; // they chose to leave, don't auto-resume
+  pendingSpectate = null; // they chose to leave so don't auto-resume
   show("home");
 });
 
-// version stamp (also proves which app.js is actually running); inline styles so
-// it shows even if style.css is stale, and it renders before boot in case boot errors
+// version stamp that also proves which app.js is actually running, inline styles so
+// it shows even if style.css is stale and it renders before boot in case boot errors
 (function showVersion() {
   const tag = document.createElement("div");
   tag.textContent = `v${APP_VERSION}`;
@@ -969,7 +993,7 @@ $("spectate-gone-back").addEventListener("click", () => {
   document.body.appendChild(tag);
 })();
 
-// cosmetic - must never block the boot flow
+// cosmetic so must never block the boot flow
 try {
   startRain($("rain"));
   startTrail();
