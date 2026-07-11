@@ -82,7 +82,7 @@ CACHED_HEIGHT, CACHED_FPS = 576, 30
 LIVE_HEIGHT, LIVE_FPS = 360, 24
 
 # how many pre-rendered clips to keep on disk per chart-guess type
-TARGETS = {"chart": 100, "chart_append": 100}
+TARGETS = {"chart": 500, "chart_append": 500}
 
 
 def _settings(starting_combo: int, mirror: bool, height: int, fps: int) -> str:
