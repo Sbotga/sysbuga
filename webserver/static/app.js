@@ -272,7 +272,7 @@ function appendLog(logEl, icon, text, cls) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-// player's own guess log entry — mirror it to anyone spectating us
+// player's own guess log entry - mirror it to anyone spectating us
 function playerLog(icon, text, cls) {
   const entry = { marker: icon, text, cls };
   appendLog($("guess-log"), icon, text, cls);
@@ -284,15 +284,25 @@ function playerLog(icon, text, cls) {
 function setRoundMedia(imgId, videoId, round) {
   const img = $(imgId);
   const video = $(videoId);
+  const audio = $(imgId.replace("-image", "-audio"));
   const url = `${API}/api/activity/guess/round/${round.round_id}/image`;
   if (round.image_media === "video/mp4") {
+    clearAudio(audio);
     img.hidden = true;
     img.removeAttribute("src");
     video.src = url;
     video.hidden = false;
     video.play().catch(() => {}); // sticky activation from the start click lets sound play
+  } else if (round.image_media === "audio/mpeg") {
+    clearVideo(video);
+    img.hidden = true;
+    img.removeAttribute("src");
+    audio.src = url;
+    audio.hidden = false;
+    audio.play().catch(() => {});
   } else {
     clearVideo(video);
+    clearAudio(audio);
     img.src = url;
     img.hidden = false;
   }
@@ -308,11 +318,22 @@ function clearVideo(video) {
   video.load();
 }
 
+function clearAudio(audio) {
+  if (!audio) return;
+  audio.hidden = true;
+  try {
+    audio.pause();
+  } catch {}
+  audio.removeAttribute("src");
+  audio.load();
+}
+
 function clearRoundMedia(imgId, videoId) {
   const img = $(imgId);
   img.hidden = true;
   img.removeAttribute("src");
   clearVideo($(videoId));
+  clearAudio($(imgId.replace("-image", "-audio")));
 }
 
 async function startRound(mode) {
@@ -357,7 +378,15 @@ async function startRound(mode) {
   }
   setFormEnabled(true);
   $("btn-giveup").hidden = false;
-  armGiveup(round.giveup_at);
+  if (round.mode === "music") {
+    // give-up unlocks only once the whole song is revealed (stage 4), not on a timer
+    disarmGiveup();
+    const btn = $("btn-giveup");
+    btn.disabled = round.stage < round.max_stage;
+    btn.title = btn.disabled ? "Reveal the full song first (use hints)." : "";
+  } else {
+    armGiveup(round.giveup_at);
+  }
   $("guess-input").focus();
   startTimer(round.expires_at);
   lastRoundPayload = {
@@ -387,10 +416,21 @@ function showReveal(round, message, cls) {
   $("btn-again").hidden = false;
   // the guess log stays visible after the reveal on purpose
   if (round.has_reveal) {
-    clearVideo($("round-video")); // reveal is always the full chart image
+    clearVideo($("round-video")); // reveal image is a jacket / full chart
     const img = $("round-image");
     img.src = `${API}/api/activity/guess/round/${round.round_id}/reveal`;
     img.hidden = false;
+  } else {
+    clearRoundMedia("round-image", "round-video");
+  }
+  if (round.has_full) {
+    // music reveal: play the whole song alongside the jacket
+    const audio = $("round-audio");
+    audio.src = `${API}/api/activity/guess/round/${round.round_id}/full`;
+    audio.hidden = false;
+    audio.play().catch(() => {});
+  } else {
+    clearAudio($("round-audio"));
   }
   myResult = {
     text: message,
@@ -474,7 +514,7 @@ async function giveUp() {
     });
     showReveal({ ...round, ...res }, `You gave up. It was ${res.answer}.`, "bad");
   } catch (e) {
-    // server rejected the give-up (e.g. the 1/3 gate) — keep the round going
+    // server rejected the give-up (e.g. the 1/3 gate) - keep the round going
     setResult(e.message, "bad");
   }
 }
@@ -488,7 +528,27 @@ async function useHint() {
       method: "POST",
       body: JSON.stringify({ round_id: currentRound.round_id }),
     });
-    playerLog("💡", `${res.hint}  (${res.length} chars)`, "hint");
+    if (res.stage !== undefined) {
+      // music mode: a hint reveals a longer clip
+      if (res.already) {
+        playerLog("💡", `Stage ${res.stage}/${res.max_stage} - the full song is already provided.`, "hint");
+      } else {
+        const audio = $("round-audio");
+        audio.src = `${API}/api/activity/guess/round/${currentRound.round_id}/image?s=${res.stage}`;
+        audio.hidden = false;
+        audio.play().catch(() => {});
+        playerLog("💡", `Stage ${res.stage}/${res.max_stage} - ${res.seconds}s of the song`, "hint");
+        if (currentRound) currentRound.stage = res.stage;
+        if (res.stage >= res.max_stage) {
+          // full song revealed: give-up is now allowed
+          const btn = $("btn-giveup");
+          btn.disabled = false;
+          btn.title = "";
+        }
+      }
+    } else {
+      playerLog("💡", `${res.hint}  (${res.length} chars)`, "hint");
+    }
   } catch (e) {
     setResult(e.message, "bad");
   }
@@ -700,7 +760,7 @@ function renderSpectateList() {
     const li = document.createElement("li");
     const btn = document.createElement("button");
     btn.className = m.active ? "spectate-item" : "spectate-item idle";
-    // clickable even when idle — you'll watch them and auto-switch to their round
+    // clickable even when idle - you'll watch them and auto-switch to their round
     // the moment they start playing
     btn.innerHTML =
       `<img alt="" /><span class="who"><span class="name"></span><span class="mode"></span></span>`;
@@ -870,7 +930,7 @@ $("btn-quit").addEventListener("click", async () => {
     lastRoundPayload = null;
     myGuessLog = [];
     myResult = null;
-    hubSend({ op: "clear" }); // already revealed — stop broadcasting the finished round
+    hubSend({ op: "clear" }); // already revealed - stop broadcasting the finished round
     return show("setup");
   }
   if (await confirmModal("Quit this round?", "Quit", "Keep playing")) {
@@ -909,7 +969,7 @@ $("spectate-gone-back").addEventListener("click", () => {
   document.body.appendChild(tag);
 })();
 
-// cosmetic — must never block the boot flow
+// cosmetic - must never block the boot flow
 try {
   startRain($("rain"));
   startTrail();

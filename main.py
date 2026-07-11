@@ -11,7 +11,7 @@ from data.constants import Constants
 from data.pjsk import PJSKData
 from database.pool import close_pool, create_pool
 from database.queries import UserData
-from helpers import embeds
+from helpers import embeds, unblock
 from helpers.autocompletes import Autocompletes, autocompletes
 from helpers.cache import CACHE
 from helpers.config_loader import Config, get_config, set_config_path
@@ -109,6 +109,7 @@ class SbugaBot(commands.Bot):
         if self.sbuga:
             await self.sbuga.close()
         await close_pool()
+        unblock.shutdown()
         await super().close()
 
 

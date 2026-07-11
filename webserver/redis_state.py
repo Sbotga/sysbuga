@@ -58,8 +58,8 @@ async def save_round(
     image: bytes | None,
     reveal: bytes | None,
 ) -> None:
-    """Store a round's metadata (+ optional image/reveal PNG bytes) and mark it as
-    the user's active round, replacing any previous one."""
+    """Store a round's metadata (+ optional image/reveal bytes) and mark it as the user's
+    active round, replacing any previous one."""
     r = get_redis()
     prev = await r.getdel(f"{_KEY}:uround:{user_id}")
     if prev:
@@ -73,6 +73,27 @@ async def save_round(
             pipe.set(f"{_rk(round_id)}:rev", reveal, ex=ROUND_TTL)
         pipe.set(f"{_KEY}:uround:{user_id}", round_id.encode(), ex=ROUND_TTL)
         await pipe.execute()
+
+
+async def set_round_image(round_id: str, image: bytes) -> None:
+    """Replace the served image/audio blob (a music hint reveals a longer clip), keeping the
+    round's remaining ttl."""
+    r = get_redis()
+    ttl = await r.ttl(f"{_rk(round_id)}:img")
+    await r.set(f"{_rk(round_id)}:img", image, ex=ttl if ttl and ttl > 0 else ROUND_TTL)
+
+
+async def set_round_stage(round_id: str, stage: int, clip: bytes) -> None:
+    """Stash a small pre-generated music stage clip so a hint can swap it in instantly."""
+    r = get_redis()
+    ttl = await r.ttl(_rk(round_id))
+    await r.set(
+        f"{_rk(round_id)}:s{stage}", clip, ex=ttl if ttl and ttl > 0 else ROUND_TTL
+    )
+
+
+async def get_round_stage(round_id: str, stage: int) -> bytes | None:
+    return await get_redis().get(f"{_rk(round_id)}:s{stage}")
 
 
 async def get_round(round_id: str) -> dict[str, Any] | None:
@@ -100,7 +121,14 @@ async def get_round_reveal(round_id: str) -> bytes | None:
 
 
 async def _del_round(r: aioredis.Redis, round_id: str) -> None:
-    await r.delete(_rk(round_id), f"{_rk(round_id)}:img", f"{_rk(round_id)}:rev")
+    await r.delete(
+        _rk(round_id),
+        f"{_rk(round_id)}:img",
+        f"{_rk(round_id)}:rev",
+        f"{_rk(round_id)}:s2",
+        f"{_rk(round_id)}:s3",
+        f"{_rk(round_id)}:s4",
+    )
 
 
 async def finish_round(round_id: str, user_id: int) -> None:

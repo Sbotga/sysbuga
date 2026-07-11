@@ -1,9 +1,11 @@
+import asyncio
 from typing import Any, Literal
 from urllib.parse import quote
 
 import aiohttp
 
 from data.models import Music
+from helpers import unblock
 from services.models import (
     AddEventAliasBody,
     AddSongAliasBody,
@@ -148,7 +150,11 @@ class SbugaClient:
             image_type=image_type or self.image_type,
             ignore_leak=str(ignore_leak).lower(),
         )
-        return MusicsResponse.model_validate(data).musics
+        # validating the whole musics payload (~hundreds of models) is heavy; keep it off
+        # the event loop
+        return await asyncio.get_running_loop().run_in_executor(
+            unblock.executor, lambda: MusicsResponse.model_validate(data).musics
+        )
 
     async def search_musics(self, body: MusicSearchBody) -> list[int]:
         data = await self._request(

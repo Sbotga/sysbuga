@@ -25,15 +25,15 @@ from cogs.guessing import (
     GIVEUP_FRACTION,
     GUESS_TIME,
     MODE_TIME,
-    _crop_chart,
-    _crop_square,
+    MUSIC_HINT_COOLDOWN,
     _fetch_bytes,
 )
+from helpers.imaging import _crop_chart, _crop_square
 from data.pjsk import character_display_name
 from data.search import preprocess
 from data.song_equivalents import songs_equivalent
 from helpers import converters, unblock
-from services import chart_cache, chart_clip, chart_preview
+from services import chart_cache, chart_clip, chart_preview, song_clip
 from webserver import redis_state, spectate
 
 if TYPE_CHECKING:
@@ -55,6 +55,7 @@ MODES: dict[str, str] = {
     "character": "Character",
     "character_bw": "Character (grayscale)",
     "event": "Event",
+    "music": "Music",
 }
 
 router = APIRouter(prefix="/api/activity")
@@ -131,6 +132,40 @@ async def _build_round(
         "image_media": "image/png",
         "reveal": None,
     }
+
+    if mode == "music":
+        all_musics = pjsk.musics()
+        for _ in range(5):
+            music = random.choice(all_musics)
+            url = song_clip.pick_nosil_url(music)
+            if not url:
+                continue
+            audio = await _safe_fetch(url)
+            if not audio:
+                continue
+            start = await song_clip.choose_window(audio)
+            if start is None:
+                continue  # too short to place a window
+            try:
+                clip = await song_clip.stage_clip(audio, start, 1)
+            except song_clip.SongClipError:
+                continue
+            round_data["type"] = "song"
+            round_data["answer_id"] = music.id
+            round_data["answer_name"] = music.title
+            round_data["reveal"] = await _safe_fetch(music.jacket_url)
+            round_data["image"] = clip
+            round_data["image_media"] = "audio/mpeg"
+            round_data["audio_url"] = url  # re-fetched for the reveal, never stored
+            round_data["audio"] = audio  # only to pre-cut the stages, not persisted
+            round_data["start"] = start
+            round_data["stage"] = 1
+            round_data["prompt"] = (
+                f"Guess the song from a {int(song_clip.STAGE_SECONDS[1])} second clip. "
+                "Use a hint to hear more."
+            )
+            return round_data
+        return None
 
     if mode in (
         "jacket",
@@ -302,7 +337,7 @@ def _match(pjsk: "PJSKData", round_data: dict[str, Any], guess: str):
 def _meta(
     round_data: dict[str, Any], user_id: int, expires_at: float
 ) -> dict[str, Any]:
-    return {
+    meta = {
         "mode": round_data["mode"],
         "type": round_data["type"],
         "answer_id": round_data["answer_id"],
@@ -315,6 +350,14 @@ def _meta(
         "user_id": user_id,
         "finished": False,
     }
+    if "stage" in round_data:  # music mode: track hint progression
+        meta["stage"] = round_data["stage"]
+        meta["max_stage"] = song_clip.MAX_STAGE
+        meta["last_hint"] = 0.0
+        meta["start"] = round_data["start"]
+        meta["audio_url"] = round_data["audio_url"]  # re-fetched for the reveal
+        meta["has_full"] = bool(round_data.get("audio_url"))
+    return meta
 
 
 @router.get("/settings")
@@ -376,8 +419,13 @@ async def start_round(
     await redis_state.save_round(
         round_id, user_id, meta, round_data["image"], round_data["reveal"]
     )
+    if body.mode == "music":
+        # cut the longer stage clips in the background while they listen to stage 1
+        asyncio.create_task(
+            _pregen_music_stages(round_id, round_data["audio"], round_data["start"])
+        )
 
-    return {
+    resp = {
         "round_id": round_id,
         "mode": body.mode,
         "type": meta["type"],
@@ -388,6 +436,11 @@ async def start_round(
         "expires_at": expires_at,
         "giveup_at": now + max_time * GIVEUP_FRACTION,
     }
+    if "stage" in meta:  # music mode
+        resp["stage"] = meta["stage"]
+        resp["max_stage"] = meta["max_stage"]
+        resp["has_full"] = meta.get("has_full", False)
+    return resp
 
 
 @router.get("/guess/round/{round_id}/image")
@@ -408,6 +461,29 @@ async def round_reveal(round_id: str) -> Response:
     return Response(content=img, media_type="image/png")
 
 
+@router.get("/guess/round/{round_id}/full")
+async def round_full(round_id: str) -> Response:
+    """The whole song audio, shown on a music round's reveal - re-fetched from its url so we
+    never keep the megabytes around."""
+    meta = await redis_state.get_round(round_id)
+    url = (meta or {}).get("audio_url")
+    audio = await _safe_fetch(url) if url else None
+    if not audio:
+        raise HTTPException(status_code=404, detail="not found")
+    return Response(content=audio, media_type="audio/mpeg")
+
+
+async def _pregen_music_stages(round_id: str, audio: bytes, start: float) -> None:
+    """Cut the longer stage clips in the background and stash them, so hints are instant and
+    the whole song isn't kept in memory."""
+    for stage in range(2, song_clip.MAX_STAGE + 1):
+        try:
+            clip = await song_clip.stage_clip(audio, start, stage)
+            await redis_state.set_round_stage(round_id, stage, clip)
+        except Exception:
+            pass
+
+
 @router.post("/guess/hint")
 async def hint(
     request: Request,
@@ -418,12 +494,53 @@ async def hint(
     meta = await redis_state.get_round(body.round_id)
     if not meta or meta["user_id"] != user_id or meta.get("finished"):
         raise HTTPException(status_code=404, detail="no active round")
+    user_data = _user_data(request.app.state)
+    if meta["mode"] == "music":
+        return await _music_hint(body.round_id, meta, user_id, user_data)
     name = str(meta["answer_name"])
     masked = name[0] + "".join("_" if c != " " else " " for c in name[1:])
-    user_data = _user_data(request.app.state)
     if user_data:
         await user_data.add_guesses(user_id, meta["mode"], "hint")
     return {"hint": masked, "length": len(name)}
+
+
+async def _music_hint(
+    round_id: str, meta: dict[str, Any], user_id: int, user_data: "UserData | None"
+) -> dict[str, Any]:
+    stage = meta.get("stage", 1)
+    if stage >= song_clip.MAX_STAGE:
+        return {
+            "stage": stage,
+            "max_stage": song_clip.MAX_STAGE,
+            "seconds": int(song_clip.FULL_SECONDS),
+            "done": True,
+            "already": True,
+        }
+    now = time.time()
+    if now - meta.get("last_hint", 0.0) < MUSIC_HINT_COOLDOWN:
+        raise HTTPException(
+            status_code=429, detail="Please wait a moment before the next hint."
+        )
+    stage += 1
+    # the pre-generated clip if it's ready, else re-fetch the song and cut this one
+    clip = await redis_state.get_round_stage(round_id, stage)
+    if not clip:
+        audio = await _safe_fetch(meta.get("audio_url"))
+        if not audio:
+            raise HTTPException(status_code=404, detail="clip unavailable")
+        clip = await song_clip.stage_clip(audio, meta.get("start", 0.0), stage)
+    meta["stage"] = stage
+    meta["last_hint"] = now
+    await redis_state.set_round_image(round_id, clip)
+    await redis_state.update_round(round_id, meta)
+    if user_data:
+        await user_data.add_guesses(user_id, meta["mode"], "hint")
+    return {
+        "stage": stage,
+        "max_stage": song_clip.MAX_STAGE,
+        "seconds": int(song_clip.STAGE_SECONDS[stage]),
+        "done": stage >= song_clip.MAX_STAGE,
+    }
 
 
 @router.post("/guess/reveal")
@@ -437,16 +554,24 @@ async def reveal_answer(
     meta = await redis_state.get_round(body.round_id)
     if not meta or meta["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="no active round")
-    # can't give up until at least 1/3 of the round has elapsed
-    started = meta.get("started_at")
-    if started is not None:
-        max_time = MODE_TIME.get(meta["mode"], GUESS_TIME)
-        remaining = started + max_time * GIVEUP_FRACTION - time.time()
-        if remaining > 0:
+    if meta["mode"] == "music":
+        # can't give up until the whole song is revealed (stage 4)
+        if meta.get("stage", 1) < song_clip.MAX_STAGE:
             raise HTTPException(
                 status_code=403,
-                detail=f"You can't give up yet — wait {math.ceil(remaining)} more seconds.",
+                detail="You can't give up yet - use hints until you've heard the full song.",
             )
+    else:
+        # can't give up until at least 1/3 of the round has elapsed
+        started = meta.get("started_at")
+        if started is not None:
+            max_time = MODE_TIME.get(meta["mode"], GUESS_TIME)
+            remaining = started + max_time * GIVEUP_FRACTION - time.time()
+            if remaining > 0:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"You can't give up yet - wait {math.ceil(remaining)} more seconds.",
+                )
     await redis_state.finish_round(body.round_id, user_id)
     return {"answer": meta["answer_name"], "has_reveal": meta["has_reveal"]}
 

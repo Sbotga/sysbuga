@@ -26,7 +26,7 @@ SETTING_OPTIONS = {
     "default_difficulty": ["Master", "Expert", "Hard", "Normal", "Easy"],
 }
 SETTING_DESCRIPTIONS = {
-    "mirror_charts_by_default": "Applies to guessing as well!",
+    "mirror_charts_by_default": "Does not apply to guessing, only chart views.",
     "default_difficulty": "Does NOT include Append — not every song has an Append chart.",
 }
 IGNORE_SETTINGS = ["first_time_guess_end"]

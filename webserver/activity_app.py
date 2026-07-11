@@ -18,6 +18,7 @@ from starlette.types import Scope
 from data.pjsk import PJSKData
 from database.pool import close_pool, create_pool
 from database.queries import UserData
+from helpers import unblock
 from helpers.config_loader import Config, get_config, set_config_path
 from services import chart_preview
 from services.sbuga import SbugaClient
@@ -67,6 +68,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     config = get_config()
     scfg = config["sbuga"]
 
+    chart_preview.cleanup_orphans()  # kill renderer processes a prior crash leaked
     db = await create_pool()
     sbuga = SbugaClient(
         scfg["api_url"],
@@ -97,6 +99,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await redis_state.close_redis()
         await pjsk.stop()
         await sbuga.close()
+        unblock.shutdown()
         await close_pool()
 
 

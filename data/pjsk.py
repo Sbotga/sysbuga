@@ -5,6 +5,7 @@ from functools import partial
 
 from data import masterdata, search
 from data.models import Card, Character, CheerfulCarnivalTeam, Event, Gacha, Music
+from helpers import unblock
 from helpers.emojis import emojis
 from services.sbuga import Region, SbugaClient, SbugaError
 
@@ -81,6 +82,15 @@ class PJSKData:
         return self.client.asset_url(path, region)  # type: ignore[arg-type]
 
     # --- disk ---
+
+    @staticmethod
+    async def _to_thread(fn, *args):
+        """Run blocking CPU/IO (pydantic dump/validate, JSON to disk) off the event loop.
+        These read/build model objects but never mutate shared state that a concurrent
+        lookup writes, so a worker thread is safe."""
+        return await asyncio.get_running_loop().run_in_executor(
+            unblock.executor, fn, *args
+        )
 
     @staticmethod
     def _ensure_dirs() -> None:
@@ -353,7 +363,7 @@ class PJSKData:
             self._apply_song_aliases()
             merged = list(self._merged_music().values())
             await search.build_search_maps(merged, new_music, versions=self._versions)
-            self._save_music()
+            await self._to_thread(self._save_music)
 
             await self._refresh_events()
             await self._refresh_extras()
@@ -370,8 +380,13 @@ class PJSKData:
                 events_raw, bonuses, blooms, units = await self._get_masters(
                     masterdata.EVENT_FILES, r
                 )
-                new_events[r] = masterdata.build_events(
-                    events_raw, bonuses, blooms, units, partial(self._asset_url, r)
+                new_events[r] = await self._to_thread(
+                    masterdata.build_events,
+                    events_raw,
+                    bonuses,
+                    blooms,
+                    units,
+                    partial(self._asset_url, r),
                 )
             except Exception:
                 unavailable = True
@@ -385,7 +400,7 @@ class PJSKData:
         await self._fetch_event_aliases()
         self._apply_event_aliases()
         await search.build_event_search_map(self._all_region_events())
-        self._save_events()
+        await self._to_thread(self._save_events)
 
     async def _fetch_song_aliases(self) -> set[int]:
         """Refresh the cached song aliases. Returns the ids whose alias lists changed."""
@@ -521,14 +536,18 @@ class PJSKData:
                 new_gachas[r] = self._gacha_cache.get(r, [])
                 continue
             available = True
-            for c in masterdata.build_characters(game_chars, profiles):
+            for c in await self._to_thread(
+                masterdata.build_characters, game_chars, profiles
+            ):
                 chars[c.id] = c
-            for t in masterdata.build_teams(cc_teams):
+            for t in await self._to_thread(masterdata.build_teams, cc_teams):
                 teams[t.id] = t
-            for card in masterdata.build_cards(cards_raw, partial(self._asset_url, r)):
+            for card in await self._to_thread(
+                masterdata.build_cards, cards_raw, partial(self._asset_url, r)
+            ):
                 cards[card.id] = card
-            new_gachas[r] = masterdata.build_gachas(
-                gachas_raw, partial(self._asset_url, r)
+            new_gachas[r] = await self._to_thread(
+                masterdata.build_gachas, gachas_raw, partial(self._asset_url, r)
             )
 
         if available:
@@ -541,7 +560,7 @@ class PJSKData:
                 "character/gacha features dormant (see MISSING_SBUGA_ROUTES.md #1)"
             )
         self._gacha_cache = new_gachas
-        self._save_extras()
+        await self._to_thread(self._save_extras)
 
     async def _poll(self) -> None:
         while True:
@@ -576,7 +595,7 @@ class PJSKData:
                     self._event_aliases[e.id] = sorted(e.name_variants)
 
     async def start(self) -> None:
-        self._load_from_disk()
+        await self._to_thread(self._load_from_disk)
         self._seed_alias_cache()
         if self._music_cache:
             merged = list(self._merged_music().values())

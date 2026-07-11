@@ -16,6 +16,7 @@ import asyncio
 import os
 import shutil
 import signal
+import sys
 import time
 from pathlib import Path
 from typing import Callable
@@ -96,6 +97,105 @@ def _headless_argv(argv: list[str]) -> list[str]:
     return [xvfb_run, "-a", *argv]
 
 
+# --- orphan cleanup ---------------------------------------------------------------
+# Sessions are started in their own session group (so os.killpg can take down xvfb + the
+# renderer together). The flip side: on a crash or SIGKILL, stop() never runs and those
+# detached groups keep running, each holding a GL context + assets. We record every spawned
+# pid to a pidfile and, on the next startup, kill any that are still one of our renderers.
+# The pidfile is keyed per pm2 instance / entry script, so a restart reaps its OWN leftovers
+# while a concurrently-running sibling (e.g. the activity workers) is never touched.
+
+
+def _pidfile() -> Path:
+    inst = (
+        os.environ.get("pm_id")
+        or os.environ.get("NODE_APP_INSTANCE")
+        or Path(sys.argv[0]).stem
+        or "sbuga"
+    )
+    return Path("cache") / f"nxsk_sessions_{inst}.pid"
+
+
+def _record_session(pid: int) -> None:
+    # "<owner pid> <session pid>": the owner lets a sweep tell a leftover (owner dead) from
+    # a sibling worker's live session (owner alive) even when they share this pidfile
+    try:
+        pf = _pidfile()
+        pf.parent.mkdir(parents=True, exist_ok=True)
+        with open(pf, "a", encoding="utf-8") as f:
+            f.write(f"{os.getpid()} {pid}\n")
+    except OSError:
+        pass
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but not ours to signal
+    except OSError:
+        return False
+
+
+def _is_renderer(pid: int) -> bool:
+    """Guard against killing an unrelated process that reused a recorded pid."""
+    if os.name == "nt":
+        return True  # dev only; the taskkill below is best-effort
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return b"nxsk-chart-preview" in f.read()
+    except OSError:
+        return False
+
+
+def _hard_kill(pid: int) -> None:
+    try:
+        if os.name == "nt":
+            import subprocess
+
+            subprocess.run(
+                ["taskkill", "/F", "/PID", str(pid)], capture_output=True, check=False
+            )
+        else:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def cleanup_orphans() -> None:
+    """Kill nxsk sessions leaked by a previous run (crash / SIGKILL, where stop() never ran).
+    Only sessions whose owner process is gone are reaped, so a concurrently-running sibling's
+    live sessions are left alone. Run once at startup, before spawning anything."""
+    pf = _pidfile()
+    try:
+        lines = pf.read_text("utf-8").splitlines()
+    except OSError:
+        return
+    keep: list[str] = []
+    for line in lines:
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            owner, session = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        if _alive(owner):
+            keep.append(line)  # a live instance still owns this session
+        elif _is_renderer(session):
+            _hard_kill(session)  # owner is gone: leftover, reap it
+    try:
+        if keep:
+            pf.write_text("\n".join(keep) + "\n", "utf-8")
+        else:
+            pf.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 async def _kill(session: "Session") -> None:
     """kill the whole process group: on linux the child is `xvfb-run`, which forks xvfb +
     the renderer, so killing just it orphans them. on windows the child is the renderer.
@@ -126,6 +226,7 @@ async def _spawn() -> "Session":
         start_new_session=os.name != "nt",
     )
     session = Session(process)
+    _record_session(process.pid)  # so a crash's leftover can be reaped next startup
     assert process.stdout is not None
     try:
         while True:
