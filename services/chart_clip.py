@@ -62,9 +62,17 @@ def cut_window(sus_text: str) -> "Window | None":
     if base.duration <= MIN_START:
         return None
 
+    # keep the whole window inside the chart so we never cut a stub at the end. if the chart
+    # can't fit MIN_START + a full clip, take the last CLIP_SECONDS (or the whole chart).
+    latest_start = base.duration - CLIP_SECONDS
+    if latest_start < MIN_START:
+        start_lo = start_hi = max(0.0, latest_start)
+    else:
+        start_lo, start_hi = MIN_START, latest_start
+
     for _ in range(WINDOW_ATTEMPTS):
         score = sus.load(io.StringIO(sus_text))
-        start = random.uniform(MIN_START, base.duration)
+        start = random.uniform(start_lo, start_hi)
         starting_combo, (start_tick, end_tick) = score.cut(start, start + CLIP_SECONDS)
         if score.combo_count < MIN_COMBO or score.note_count < MIN_NOTES:
             continue

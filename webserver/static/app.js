@@ -16,6 +16,7 @@ let accessToken = null;
 let currentMode = null;
 let currentRound = null; // active (unfinished) round, else null
 let timerHandle = null;
+let giveupHandle = null; // enables the give-up button once 1/3 of the round has elapsed
 let theme = "dark";
 let appName = "SYSbuga";
 
@@ -208,6 +209,30 @@ function stopTimer() {
   timerHandle = null;
 }
 
+// the give-up button stays disabled until 1/3 of the round has elapsed (giveup_at)
+function armGiveup(giveupAt) {
+  disarmGiveup();
+  const btn = $("btn-giveup");
+  const ready = () => {
+    btn.disabled = false;
+    btn.title = "";
+    giveupHandle = null;
+  };
+  const wait = giveupAt ? giveupAt - Date.now() / 1000 : 0;
+  if (wait <= 0) {
+    ready();
+    return;
+  }
+  btn.disabled = true;
+  btn.title = "You can't give up yet.";
+  giveupHandle = setTimeout(ready, wait * 1000);
+}
+
+function disarmGiveup() {
+  if (giveupHandle) clearTimeout(giveupHandle);
+  giveupHandle = null;
+}
+
 function startTimer(expiresAt) {
   stopTimer();
   const el = $("round-timer");
@@ -301,6 +326,7 @@ async function startRound(mode) {
   $("btn-again").hidden = true;
   $("guess-form").hidden = false;
   $("btn-giveup").hidden = true; // shown once the round is live
+  disarmGiveup();
   clearRoundMedia("round-image", "round-video");
   $("round-timer").hidden = true; // no timer while loading
   $("round-prompt").textContent = "Loading…";
@@ -331,6 +357,7 @@ async function startRound(mode) {
   }
   setFormEnabled(true);
   $("btn-giveup").hidden = false;
+  armGiveup(round.giveup_at);
   $("guess-input").focus();
   startTimer(round.expires_at);
   lastRoundPayload = {
@@ -355,6 +382,7 @@ function showReveal(round, message, cls) {
   setResult(message, cls);
   $("guess-form").hidden = true;
   $("btn-giveup").hidden = true;
+  disarmGiveup();
   $("btn-hint").disabled = true;
   $("btn-again").hidden = false;
   // the guess log stays visible after the reveal on purpose
@@ -438,7 +466,17 @@ async function giveUp() {
   if (!currentRound) return;
   if (!(await confirmModal("Give up and reveal the answer?", "Give up", "Keep playing"))) return;
   if (!currentRound) return;
-  await reveal(currentRound, "You gave up.", "bad");
+  const round = currentRound;
+  try {
+    const res = await api("/api/activity/guess/reveal", {
+      method: "POST",
+      body: JSON.stringify({ round_id: round.round_id }),
+    });
+    showReveal({ ...round, ...res }, `You gave up. It was ${res.answer}.`, "bad");
+  } catch (e) {
+    // server rejected the give-up (e.g. the 1/3 gate) — keep the round going
+    setResult(e.message, "bad");
+  }
 }
 
 async function useHint() {

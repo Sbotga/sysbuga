@@ -350,8 +350,8 @@ class SongInfo(commands.Cog):
         buttons = []
         if not hide_chart:
             buttons.append(("Open Chart", url))
-        if sonolus_url:
-            buttons.append(("Play On Sonolus", sonolus_url))
+        # if sonolus_url:
+        #     buttons.append(("Play On Sonolus", sonolus_url))
         if buttons:
             view = LinkButtonView(buttons)
         else:

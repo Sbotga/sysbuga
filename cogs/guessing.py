@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import math
 import random
 import time
 from typing import TYPE_CHECKING, Any
@@ -34,7 +35,31 @@ MODE_TIME = {
     "chart_append": 90,
 }
 GUESS_PREFIX = "-"
+# players must let at least this fraction of the round elapse before they can give up
+GIVEUP_FRACTION = 1 / 3
 _ASSET_ATTEMPTS = 5
+
+# A bare number is matched as a song *id*, which collides with songs whose actual title is
+# that number. When a guess of the plain number lands on the id-sharing song, nudge the
+# guesser toward the one they probably meant. Keyed by (typed text, matched song id) ->
+# (intended song's name, how to type it). Mirrors old Sbotga's hardcoded list.
+_ID_COLLISION_HINTS: dict[tuple[str, int], tuple[str, str]] = {
+    ("88", 88): ("88☆彡", "88s or 224"),
+    ("1", 1): ("「１」", "[1] or 132"),
+}
+
+
+def _id_collision_hint(content: str, music: Any) -> str:
+    entry = _ID_COLLISION_HINTS.get((content.strip(), music.id))
+    if not entry:
+        return ""
+    intended_name, suggestion = entry
+    return (
+        f"\n-# Did you mean to guess **{intended_name}**? `{content.strip()}` is the ID for "
+        f"**{music.title}**, so use `{suggestion}` to guess **{intended_name}**."
+    )
+
+
 _CHART_CLIP_ATTEMPTS = 3  # capped lower: each attempt may render a video
 
 
@@ -489,7 +514,8 @@ class GuessCog(commands.Cog):
         else:
             await message.reply(
                 embed=embeds.error_embed(
-                    f"Incorrectly guessed {converters.describe_song_match(music.title, key)}.",
+                    f"Incorrectly guessed {converters.describe_song_match(music.title, key)}."
+                    + _id_collision_hint(content, music),
                     title="Incorrect",
                 )
             )
@@ -859,6 +885,18 @@ class GuessCog(commands.Cog):
                 embed=embeds.error_embed("There's no active guess here.")
             )
             return
+        started = data.get("startTime")
+        if started:
+            max_time = MODE_TIME.get(data["guessing"], GUESS_TIME)
+            remaining = started + max_time * GIVEUP_FRACTION - time.time()
+            if remaining > 0:
+                await interaction.followup.send(
+                    embed=embeds.error_embed(
+                        f"You can't give up yet — wait `{math.ceil(remaining)}` "
+                        "more seconds."
+                    )
+                )
+                return
         self.remove_guess(self.bot, interaction.channel.id)  # type: ignore[union-attr]
         embed = embeds.embed(
             title="Guess Ended",

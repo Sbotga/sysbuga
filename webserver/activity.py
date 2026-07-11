@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import random
 import secrets
 import time
@@ -21,6 +22,7 @@ from fastapi import (
 from pydantic import BaseModel
 
 from cogs.guessing import (
+    GIVEUP_FRACTION,
     GUESS_TIME,
     MODE_TIME,
     _crop_chart,
@@ -367,7 +369,8 @@ async def start_round(
 
     round_id = secrets.token_urlsafe(24)
     now = time.time()
-    expires_at = now + MODE_TIME.get(body.mode, GUESS_TIME)
+    max_time = MODE_TIME.get(body.mode, GUESS_TIME)
+    expires_at = now + max_time
     meta = _meta(round_data, user_id, expires_at)
     meta["started_at"] = now
     await redis_state.save_round(
@@ -383,6 +386,7 @@ async def start_round(
         "image_media": meta["image_media"],
         "has_reveal": meta["has_reveal"],
         "expires_at": expires_at,
+        "giveup_at": now + max_time * GIVEUP_FRACTION,
     }
 
 
@@ -433,6 +437,16 @@ async def reveal_answer(
     meta = await redis_state.get_round(body.round_id)
     if not meta or meta["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="no active round")
+    # can't give up until at least 1/3 of the round has elapsed
+    started = meta.get("started_at")
+    if started is not None:
+        max_time = MODE_TIME.get(meta["mode"], GUESS_TIME)
+        remaining = started + max_time * GIVEUP_FRACTION - time.time()
+        if remaining > 0:
+            raise HTTPException(
+                status_code=403,
+                detail=f"You can't give up yet — wait {math.ceil(remaining)} more seconds.",
+            )
     await redis_state.finish_round(body.round_id, user_id)
     return {"answer": meta["answer_name"], "has_reveal": meta["has_reveal"]}
 

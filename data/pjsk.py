@@ -387,36 +387,45 @@ class PJSKData:
         await search.build_event_search_map(self._all_region_events())
         self._save_events()
 
-    async def _fetch_song_aliases(self) -> bool:
-        """Refresh the cached song aliases. True if they changed."""
+    async def _fetch_song_aliases(self) -> set[int]:
+        """Refresh the cached song aliases. Returns the ids whose alias lists changed."""
         try:
             aliases = await self.client.get_song_aliases()
         except Exception:
-            return False
+            return set()
         by_music: dict[int, list[str]] = {}
         for a in aliases:
             by_music.setdefault(a.music_id, []).append(a.alias)
         for values in by_music.values():
             values.sort()
-        if by_music == self._song_aliases:
-            return False
-        self._song_aliases = by_music
-        return True
+        changed = {
+            mid
+            for mid in set(by_music) | set(self._song_aliases)
+            if by_music.get(mid, []) != self._song_aliases.get(mid, [])
+        }
+        if changed:
+            self._song_aliases = by_music
+        return changed
 
-    async def _fetch_event_aliases(self) -> bool:
+    async def _fetch_event_aliases(self) -> set[int]:
+        """Refresh the cached event aliases. Returns the ids whose alias lists changed."""
         try:
             aliases = await self.client.get_event_aliases()
         except Exception:
-            return False
+            return set()
         by_event: dict[int, list[str]] = {}
         for a in aliases:
             by_event.setdefault(a.event_id, []).append(a.alias)
         for values in by_event.values():
             values.sort()
-        if by_event == self._event_aliases:
-            return False
-        self._event_aliases = by_event
-        return True
+        changed = {
+            eid
+            for eid in set(by_event) | set(self._event_aliases)
+            if by_event.get(eid, []) != self._event_aliases.get(eid, [])
+        }
+        if changed:
+            self._event_aliases = by_event
+        return changed
 
     def _apply_song_aliases(self) -> None:
         for musics in self._music_cache.values():
@@ -429,8 +438,11 @@ class PJSKData:
                 e.name_variants = self._event_aliases.get(e.id, [])
 
     async def refresh_aliases(self, force: bool = False) -> bool:
-        """Pull the alias lists and rebuild the affected search maps if they moved.
-        Cheap when nothing changed: two API calls and no map rebuild."""
+        """Pull the alias lists and update the affected search maps if they moved. When only
+        a handful of ids changed (the usual case) each is re-indexed in place — the full
+        rebuild romanizes every title (~1.5s of GIL-held work that stalls the event loop),
+        so we only pay it on `force`. Cheap when nothing changed: two API calls, no rebuild.
+        """
         songs_changed = await self._fetch_song_aliases()
         events_changed = await self._fetch_event_aliases()
         if not (force or songs_changed or events_changed):
@@ -438,16 +450,59 @@ class PJSKData:
         async with self._lock:
             if (force or songs_changed) and self._music_cache:
                 self._apply_song_aliases()
-                merged = list(self._merged_music().values())
-                await search.build_search_maps(
-                    merged, self._music_cache, versions=self._versions
-                )
-                self._save_music()
+                if force:
+                    merged = list(self._merged_music().values())
+                    await search.build_search_maps(
+                        merged, self._music_cache, versions=self._versions
+                    )
+                else:
+                    merged = self._merged_music()
+                    for mid in songs_changed:
+                        m = merged.get(mid)
+                        if m:
+                            search.reindex_song(m, self._music_cache)
+                    await search.save_maps()
             if (force or events_changed) and self._event_cache:
                 self._apply_event_aliases()
-                await search.build_event_search_map(self._all_region_events())
-                self._save_events()
+                if force:
+                    await search.build_event_search_map(self._all_region_events())
+                else:
+                    by_id: dict[int, list[Event]] = {}
+                    for e in self._all_region_events():
+                        by_id.setdefault(e.id, []).append(e)
+                    for eid in events_changed:
+                        search.reindex_event(by_id.get(eid, []))
+                    await search.save_maps()
         return True
+
+    async def _reindex_one_song(self, music_id: int) -> None:
+        """Re-index a single song in the live maps after its alias list changed, then persist.
+        No full rebuild, so it doesn't stall the loop (see refresh_aliases)."""
+        async with self._lock:
+            self._apply_song_aliases()
+            merged = self._merged_music().get(music_id)
+            if merged:
+                search.reindex_song(merged, self._music_cache)
+        await search.save_maps()
+
+    async def add_song_alias_local(self, music_id: int, alias: str) -> None:
+        """Record an alias just added through the API and re-index that song at once, so it's
+        searchable immediately without a restart or full rebuild. `alias` is preprocessed.
+        """
+        values = self._song_aliases.setdefault(music_id, [])
+        if alias not in values:
+            values.append(alias)
+            values.sort()
+        await self._reindex_one_song(music_id)
+
+    async def remove_song_alias_local(self, music_id: int, alias: str) -> None:
+        """Drop an alias just removed through the API and re-index that song at once."""
+        values = self._song_aliases.get(music_id)
+        if values and alias in values:
+            values.remove(alias)
+            if not values:
+                del self._song_aliases[music_id]
+        await self._reindex_one_song(music_id)
 
     async def _refresh_extras(self) -> None:
         chars: dict[int, Character] = {}
