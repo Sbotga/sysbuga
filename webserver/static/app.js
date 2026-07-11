@@ -209,7 +209,7 @@ function stopTimer() {
   timerHandle = null;
 }
 
-// give-up unlocks only once enough time has passed (giveup_at) and every hint is used
+// give-up unlocks only once enough time has passed (giveup_at) and at least one hint is used
 // while the timer is still running the button counts down
 function refreshGiveup() {
   const btn = $("btn-giveup");
@@ -220,14 +220,14 @@ function refreshGiveup() {
   const timeOk = secsLeft <= 0;
   const hintsOk =
     currentRound.mode === "music"
-      ? (currentRound.stage || 1) >= (currentRound.max_stage || 4)
-      : (currentRound.hints_used || 0) >= (currentRound.max_hints || 0);
+      ? (currentRound.stage || 1) >= 2
+      : (currentRound.hints_used || 0) >= 1;
   btn.disabled = !(timeOk && hintsOk);
   btn.textContent = timeOk ? "Give up" : `Give up (${Math.ceil(secsLeft)}s)`;
   btn.title = btn.disabled
     ? timeOk
-      ? "Use every hint to give up."
-      : "Give up unlocks after the timer and once every hint is used."
+      ? "Use a hint to give up."
+      : "Give up unlocks after the timer and once you use a hint."
     : "";
 }
 

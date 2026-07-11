@@ -192,7 +192,7 @@ async def _fetch_bytes(url: str) -> bytes | None:
 async def _render_one(gtype: str) -> bool:
     assert _pjsk is not None
     want = chart_clip.DIFFICULTIES[gtype]
-    music = chart_clip.weighted_chart_music(_pjsk.musics(), want)
+    music = chart_clip.weighted_chart_music(_pjsk.released_musics(), want)
     if music is None:
         return False
     region = next(

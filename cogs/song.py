@@ -379,6 +379,9 @@ class SongInfo(commands.Cog):
         music = await self._resolve_song(interaction, song)
         if not music:
             return
+        if self.bot.pjsk.is_music_leaked(music.id):  # type: ignore[union-attr]
+            await interaction.followup.send(embed=embeds.leak_embed())
+            return
 
         by = ", ".join(
             sorted(
@@ -409,8 +412,8 @@ class SongInfo(commands.Cog):
             lines.append(f"**By:** {by}")
         if music.artist:
             lines.append(f"**Artist:** {music.artist.name}")
-        if music.released_at:
-            lines.append(f"**Released:** <t:{int(music.released_at / 1000)}:D>")
+        if music.published_at:
+            lines.append(f"**Released:** <t:{int(music.published_at / 1000)}:D>")
         if music.original_video:
             lines.append(f"**Original Song:** <{music.original_video}>")
         lines.append("")

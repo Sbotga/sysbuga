@@ -47,3 +47,11 @@ def warn_embed(
         description=description,
         color=color or discord.Color.orange(),
     )
+
+
+def leak_embed(description: str | None = None) -> SbugaEmbed:
+    return embed(
+        title="🥬 Is that a leak?",
+        description=description or "That's not out yet - have a leek instead!",
+        color=discord.Color.dark_green(),
+    )

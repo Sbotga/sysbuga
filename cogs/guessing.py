@@ -157,7 +157,7 @@ class GuessCog(commands.Cog):
 
         musics = [
             m
-            for m in self.bot.pjsk.musics()  # type: ignore[union-attr]
+            for m in self.bot.pjsk.released_musics()  # type: ignore[union-attr]
             if (not has_append or has(m, "append"))
             and (not needs_master or has(m, "master"))
         ]
@@ -200,7 +200,7 @@ class GuessCog(commands.Cog):
         # fallback when the clip renderer isn't installed using the old cropped-chart round
         difficulty = chart_clip.DIFFICULTIES[mode]
         for _ in range(_ASSET_ATTEMPTS):
-            music = chart_clip.weighted_chart_music(self.bot.pjsk.musics(), difficulty)  # type: ignore[union-attr]
+            music = chart_clip.weighted_chart_music(self.bot.pjsk.released_musics(), difficulty)  # type: ignore[union-attr]
             if not music:
                 return None
             region = next((r for r in self.bot.pjsk.regions_for_music(music.id) if r in ("en", "jp")), "en")  # type: ignore[union-attr]
@@ -244,7 +244,7 @@ class GuessCog(commands.Cog):
     async def _render_chart_clip_live(self, mode: str):
         difficulty = chart_clip.DIFFICULTIES[mode]
         for _ in range(_CHART_CLIP_ATTEMPTS):
-            music = chart_clip.weighted_chart_music(self.bot.pjsk.musics(), difficulty)  # type: ignore[union-attr]
+            music = chart_clip.weighted_chart_music(self.bot.pjsk.released_musics(), difficulty)  # type: ignore[union-attr]
             if not music:
                 return None
             region = next((r for r in self.bot.pjsk.regions_for_music(music.id) if r in ("en", "jp")), "en")  # type: ignore[union-attr]
@@ -666,6 +666,7 @@ class GuessCog(commands.Cog):
 
         guess: dict[str, Any] = {
             "guessers": set(),  # user ids who've made a guess and are needed to give up
+            "host": interaction.user.id,  # the starter can give up without guessing
             "channel": interaction.channel,
             "id": tools.generate_secure_string(25),
             "guessType": None,
@@ -705,10 +706,10 @@ class GuessCog(commands.Cog):
                 return
             if (
                 embed.description
-            ):  # note when giving up unlocks and it also needs all hints used
+            ):  # note when giving up unlocks and it also needs at least one hint used
                 embed.description = (
                     f"-# You can give up in `{int(_giveup_seconds(mode))}` seconds "
-                    "(after all hints are used).\n" + embed.description
+                    "(after using a hint).\n" + embed.description
                 )
             if is_chart:
                 await interaction.edit_original_response(
@@ -1016,8 +1017,9 @@ class GuessCog(commands.Cog):
         data = self.bot.cache.guess_channels.get(channel_id)
         if not data:
             return embeds.error_embed("There's no active guess here."), [], None
-        # you can only give up on a round you've actually tried which curbs drive-by trolling
-        if user_id not in data.get("guessers", ()):
+        # the starter can give up without guessing, everyone else needs a guess first which
+        # curbs drive-by trolling
+        if user_id != data.get("host") and user_id not in data.get("guessers", ()):
             return (
                 embeds.error_embed(
                     "You must make at least one guess before giving up."
@@ -1025,29 +1027,27 @@ class GuessCog(commands.Cog):
                 [],
                 None,
             )
-        # can't give up until enough time has passed and every hint has been used
+        # can't give up until enough time has passed and at least one hint has been used
         if data["guessing"] == "music":
-            hints_done = data["data"].get("stage", 1) >= song_clip.MAX_STAGE
+            hint_used = data["data"].get("stage", 1) >= 2
         else:
-            hints_done = data["data"].get("hint_stage", 0) >= MAX_TEXT_HINTS
+            hint_used = data["data"].get("hint_stage", 0) >= 1
         started = data.get("startTime")
         remaining = 0.0
         if started:
             remaining = started + _giveup_seconds(data["guessing"]) - time.time()
-        if not hints_done and remaining > 0:
+        if not hint_used and remaining > 0:
             return (
                 embeds.error_embed(
-                    "Cannot end the guess until all hints are revealed and "
+                    "Cannot end the guess until you use a hint and "
                     f"`{math.ceil(remaining)}` more seconds pass."
                 ),
                 [],
                 None,
             )
-        if not hints_done:
+        if not hint_used:
             return (
-                embeds.error_embed(
-                    "Cannot end the guess until all hints are revealed."
-                ),
+                embeds.error_embed("Cannot end the guess until you use a hint."),
                 [],
                 None,
             )

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 from functools import partial
 
 from data import masterdata, search
@@ -232,6 +233,18 @@ class PJSKData:
     def get_music(self, music_id: int) -> Music | None:
         return self._merged_music().get(music_id)
 
+    def released_musics(self) -> list[Music]:
+        """merged musics already out in-game, leaks (published_at still in the future) excluded.
+        we fetch leaks so the data version keeps up, then filter them here (see get_musics)
+        """
+        now = int(time.time() * 1000)
+        return [m for m in self.musics() if m.published_at <= now]
+
+    def is_music_leaked(self, music_id: int) -> bool:
+        """true if the song exists in our data but isn't out in-game yet"""
+        music = self.get_music(music_id)
+        return bool(music and music.published_at > int(time.time() * 1000))
+
     def regions_for_music(self, music_id: int) -> list[str]:
         return [
             r
@@ -335,8 +348,10 @@ class PJSKData:
     # --- refresh / polling ---
 
     async def _fetch_versions(self) -> dict[str, str]:
+        # must include leaks like get_musics does, or a newly-leaked song won't bump the
+        # version and the refresh gate would skip re-pulling the music that contains it
         results = await asyncio.gather(
-            *[self.client.get_version(r) for r in self.regions],
+            *[self.client.get_version(r, ignore_leak=False) for r in self.regions],
             return_exceptions=True,
         )
         versions: dict[str, str] = {}

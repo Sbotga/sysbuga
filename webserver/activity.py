@@ -149,7 +149,7 @@ async def _build_round(
     }
 
     if mode == "music":
-        all_musics = pjsk.musics()
+        all_musics = pjsk.released_musics()
         for _ in range(5):
             music = random.choice(all_musics)
             url = song_clip.pick_nosil_url(music)
@@ -195,10 +195,10 @@ async def _build_round(
         if mode in ("chart", "chart_append", "chart_expert"):
             # weight chart selection by play level like the bot's cache filler
             music = chart_clip.weighted_chart_music(
-                pjsk.musics(), chart_clip.DIFFICULTIES[mode]
+                pjsk.released_musics(), chart_clip.DIFFICULTIES[mode]
             )
         else:
-            music = random.choice(pjsk.musics())
+            music = random.choice(pjsk.released_musics())
         if music is None:
             return None
         round_data["type"] = "song"
@@ -664,27 +664,27 @@ async def reveal_answer(
     meta = await redis_state.get_round(body.round_id)
     if not meta or meta["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="no active round")
-    # can't give up until enough time has passed and every hint has been used
+    # can't give up until enough time has passed and at least one hint has been used
     if meta["mode"] == "music":
-        hints_done = meta.get("stage", 1) >= song_clip.MAX_STAGE
+        hint_used = meta.get("stage", 1) >= 2
     else:
-        hints_done = meta.get("hint_stage", 0) >= MAX_TEXT_HINTS
+        hint_used = meta.get("hint_stage", 0) >= 1
     started = meta.get("started_at")
     remaining = 0.0
     if started is not None:
         remaining = started + _giveup_seconds(meta["mode"]) - time.time()
-    if not hints_done and remaining > 0:
+    if not hint_used and remaining > 0:
         raise HTTPException(
             status_code=403,
             detail=(
-                "Cannot end the guess until all hints are revealed and "
+                "Cannot end the guess until you use a hint and "
                 f"{math.ceil(remaining)} more seconds pass."
             ),
         )
-    if not hints_done:
+    if not hint_used:
         raise HTTPException(
             status_code=403,
-            detail="Cannot end the guess until all hints are revealed.",
+            detail="Cannot end the guess until you use a hint.",
         )
     if remaining > 0:
         raise HTTPException(
