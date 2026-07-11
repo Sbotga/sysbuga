@@ -217,6 +217,7 @@ def _settings(
             * (starting_combo / total_combo)
             * min(1 + 0.00005 * starting_combo, 1.1)
         ),
+        "pvScoreCalcTotalCombo": total_combo,
         "pvWatermarkEnabled": True,
         "pvWatermarkText": "Rendered by\nSYSbuga Discord Bot",
         "scoreTalent": talent,
