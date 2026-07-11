@@ -16,7 +16,7 @@ from pathlib import Path
 
 # keep in sync with services/chart_cache.py + chart_clip.py
 CACHE_ROOT = Path("cache/chart_clips")
-TYPES = ("chart", "chart_append")
+TYPES = ("chart", "chart_append", "chart_expert")
 SCRATCH = Path(tempfile.gettempdir()) / "sbuga_chart_clips"
 
 
