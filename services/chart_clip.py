@@ -68,7 +68,9 @@ easter_eggs = [
     },
     {
         "chance": 0.01,  # 1% chance
-        "settings": {"pvPlaybackSpeed": 2.0},
+        "settings": {
+            "pvExportPlaybackSpeed": 2.0
+        },  # export speed (pvPlaybackSpeed is preview-only)
         "description": "Why is it in 2x speed",
     },
 ]

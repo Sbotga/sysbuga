@@ -45,7 +45,7 @@ HINT_COOLDOWN = 5.0
 # non-music modes get three cumulative text hints and the last reveals this fraction of the
 # name's characters at random
 MAX_TEXT_HINTS = 3
-SONG_REVEAL_FRACTION = 1 / 4
+SONG_REVEAL_FRACTION = 1 / 5
 EVENT_REVEAL_FRACTION = 1 / 5
 
 
