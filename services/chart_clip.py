@@ -198,7 +198,7 @@ def _settings(
     total_combo: int,
     height: int,
     fps: int,
-    talent: int = 67676767,
+    talent: int = 250000,
     extra: dict | None = None,
 ) -> str:
     payload = {
@@ -211,10 +211,12 @@ def _settings(
         "pvClearType": _CLEAR_TYPE_NONE,
         "pvPreRollDuration": 1.0,
         "pvStartingCombo": starting_combo,
-        "pvStartingScore": 4.42
-        * talent
-        * (starting_combo / total_combo)
-        * (1 + 0.00005 * starting_combo),
+        "pvStartingScore": round(
+            4.42
+            * talent
+            * (starting_combo / total_combo)
+            * min(1 + 0.00005 * starting_combo, 1.1)
+        ),
         "pvWatermarkEnabled": True,
         "pvWatermarkText": "Rendered by\nSYSbuga Discord Bot",
         "scoreTalent": talent,
