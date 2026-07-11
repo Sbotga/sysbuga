@@ -29,7 +29,7 @@ _SERVER_START_TIMEOUT = 90.0  # one-time gl + asset load, per session
 
 # max total live sessions (active + idle). Each is a full GL context + assets, so this is the
 # memory ceiling — lower it on a tight box.
-MAX_SESSIONS = 3
+MAX_SESSIONS = 2
 # retire a session after this many renders and spawn a fresh one, so leaked GL memory / CPU
 # creep from a long-lived process doesn't accumulate
 _RENDERS_PER_SESSION = 7

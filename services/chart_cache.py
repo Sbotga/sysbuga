@@ -213,22 +213,20 @@ async def _render_one(gtype: str) -> bool:
     if not bgm or not jacket:
         return False
 
-    # render the two clips at once (two nxsk sessions) — they share the same cut window
+    # render the two clips one after another so the always-on filler only ever holds a
+    # single nxsk session, leaving the other free for on-the-fly rounds
     try:
-        chart_mp4, answer_mp4 = await asyncio.gather(
-            chart_clip.render_leveldata(
-                window,
-                mirror=False,
-                height=chart_clip.CACHED_HEIGHT,
-                fps=chart_clip.CACHED_FPS,
-            ),
-            chart_clip.render_answer_video(
-                window,
-                jacket,
-                bgm,
-                height=chart_clip.CACHED_HEIGHT,
-                fps=chart_clip.CACHED_FPS,
-            ),
+        chart_mp4 = await chart_clip.render_leveldata(
+            window,
+            height=chart_clip.CACHED_HEIGHT,
+            fps=chart_clip.CACHED_FPS,
+        )
+        answer_mp4 = await chart_clip.render_answer_video(
+            window,
+            jacket,
+            bgm,
+            height=chart_clip.CACHED_HEIGHT,
+            fps=chart_clip.CACHED_FPS,
         )
     except chart_clip.ChartClipError:
         return False
