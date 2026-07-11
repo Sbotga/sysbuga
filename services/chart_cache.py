@@ -217,7 +217,7 @@ async def _render_one(gtype: str) -> bool:
     if not bgm or not jacket:
         return False
 
-    # roll easter eggs once so the guess clip and its reveal share the same overrides
+    # eggs only apply to the guess clip, the reveal always shows the clean chart
     egg_settings, egg_descriptions = chart_clip.roll_easter_eggs()
 
     # render the two clips one after another so each filler slot only holds one nxsk session
@@ -234,7 +234,6 @@ async def _render_one(gtype: str) -> bool:
             bgm,
             height=chart_clip.CACHED_HEIGHT,
             fps=chart_clip.CACHED_FPS,
-            extra_settings=egg_settings,
         )
     except chart_clip.ChartClipError:
         return False

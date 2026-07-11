@@ -132,7 +132,7 @@ def _song_hint(music: Any, mode: str) -> dict[str, Any]:
 
 
 def _egg_prompt(descriptions: list[str]) -> str:
-    return "EASTER EGG! " + " ".join(descriptions)
+    return "⚠️ EASTER EGG! " + " ".join(descriptions)
 
 
 async def _build_round(

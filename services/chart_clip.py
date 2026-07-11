@@ -345,13 +345,12 @@ async def render_answer_video(
     *,
     height: int = CACHED_HEIGHT,
     fps: int = CACHED_FPS,
-    extra_settings: dict | None = None,
     timeout: float = 180.0,
 ) -> bytes:
     """the reveal clip the same cut chart rendered by nxsk with the jacket as the cover and
     the window's clipped audio as the bgm
     pre-rendered only since audio can't leak
-    extra_settings matches the guess clip's egg overrides so the two stay in sync"""
+    no easter-egg overrides so the reveal always shows the clean chart"""
     clipped = await _clip_audio(music, window.start, window.end - window.start)
     return await render_leveldata(
         window,
@@ -359,6 +358,5 @@ async def render_answer_video(
         fps=fps,
         cover=jacket,
         bgm=clipped,
-        extra_settings=extra_settings,
         timeout=timeout,
     )

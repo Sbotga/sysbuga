@@ -101,10 +101,10 @@ def _id_collision_hint(content: str, music: Any) -> str:
 
 
 def _egg_block(descriptions: list[str]) -> str:
-    """the bold EASTER EGG! banner with one bullet per triggered egg for the chart message"""
+    """the warning banner appended under the chart prompt, one bullet per triggered egg"""
     if not descriptions:
         return ""
-    return "**EASTER EGG!**\n" + "\n".join(f"- {d}" for d in descriptions) + "\n\n"
+    return "\n\n**⚠️ EASTER EGG! ⚠️**\n" + "\n".join(f"- {d}" for d in descriptions)
 
 
 _CHART_CLIP_ATTEMPTS = 3  # capped lower since each attempt may render a video
@@ -822,9 +822,9 @@ class GuessCog(commands.Cog):
                         title="Guess The Chart", color=discord.Color.dark_gold()
                     )
                     embed.description = (
-                        _egg_block(eggs)
-                        + f"Guess the song from a ~10 second {diff} chart clip.\n"
+                        f"Guess the song from a ~10 second {diff} chart clip.\n"
                         f"Use `{GUESS_PREFIX}your guess` to guess, `{GUESS_PREFIX}hint` for a hint, `{GUESS_PREFIX}end` to give up, or `{GUESS_PREFIX}time` for time left. You have {secs} seconds."
+                        + _egg_block(eggs)
                     )
                     return embed, discord.File(io.BytesIO(clip), "chart.mp4")
 
