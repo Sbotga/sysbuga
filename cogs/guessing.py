@@ -40,8 +40,8 @@ GUESS_PREFIX = "-"
 GUESS_TIP = "\n-# Use `-hint` for a hint, `-end` to give up, or `-time` for time left!"
 # music mode variant where a hint reveals more of the song rather than a fact
 MUSIC_TIP = "\n-# Use `-hint` to provide more of the song, or `-time` for time left!"
-# a music hint can't fire within this many seconds of the previous one
-MUSIC_HINT_COOLDOWN = 5.0
+# a hint can't fire within this many seconds of the previous one
+HINT_COOLDOWN = 5.0
 # non-music modes get three cumulative text hints and the last reveals this fraction of the
 # name's characters at random
 MAX_TEXT_HINTS = 3
@@ -1179,7 +1179,7 @@ class GuessCog(commands.Cog):
                 False,
             )
         now = time.time()
-        if now - d.get("last_hint", 0.0) < MUSIC_HINT_COOLDOWN:
+        if now - d.get("last_hint", 0.0) < HINT_COOLDOWN:
             return (
                 embeds.error_embed("Please wait a moment before the next hint."),
                 [],
@@ -1285,6 +1285,14 @@ class GuessCog(commands.Cog):
         stage = d.get("hint_stage", 0)
         advanced = stage < MAX_TEXT_HINTS
         if advanced:
+            now = time.time()
+            if now - d.get("last_hint", 0.0) < HINT_COOLDOWN:
+                return (
+                    embeds.error_embed("Please wait a moment before the next hint."),
+                    [],
+                    False,
+                )
+            d["last_hint"] = now
             stage += 1
             d["hint_stage"] = stage
         lines, files = await self._tier_lines(data, stage)

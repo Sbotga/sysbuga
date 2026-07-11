@@ -24,9 +24,9 @@ from pydantic import BaseModel
 from cogs.guessing import (
     EVENT_REVEAL_FRACTION,
     GUESS_TIME,
+    HINT_COOLDOWN,
     MAX_TEXT_HINTS,
     MODE_TIME,
-    MUSIC_HINT_COOLDOWN,
     SONG_REVEAL_FRACTION,
     _fetch_bytes,
     _giveup_seconds,
@@ -592,6 +592,12 @@ async def _tiered_hint(
     stage = meta.get("hint_stage", 0)
     advanced = stage < MAX_TEXT_HINTS
     if advanced:
+        now = time.time()
+        if now - meta.get("last_hint", 0.0) < HINT_COOLDOWN:
+            raise HTTPException(
+                status_code=429, detail="Please wait a moment before the next hint."
+            )
+        meta["last_hint"] = now
         stage += 1
         meta["hint_stage"] = stage
     lines, image = _tier_content(meta, stage)
@@ -621,7 +627,7 @@ async def _music_hint(
             "already": True,
         }
     now = time.time()
-    if now - meta.get("last_hint", 0.0) < MUSIC_HINT_COOLDOWN:
+    if now - meta.get("last_hint", 0.0) < HINT_COOLDOWN:
         raise HTTPException(
             status_code=429, detail="Please wait a moment before the next hint."
         )
