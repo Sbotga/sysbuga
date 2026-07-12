@@ -23,6 +23,7 @@ from fastapi import (
 from pydantic import BaseModel
 
 from cogs.guessing import (
+    EVENT_DESC_FRACTION,
     EVENT_REVEAL_FRACTION,
     GUESS_TIME,
     HINT_COOLDOWN,
@@ -410,7 +411,10 @@ async def _build_round(
                 event.bonus_attribute
             )
             round_data["event_unit"] = await event_story.unit_display(sbuga, event.id)
-            round_data["event_desc"] = await event_story.event_outline(sbuga, event.id)
+            desc = await event_story.event_outline(sbuga, event.id)
+            round_data["event_desc"] = (
+                _masked_name(desc, EVENT_DESC_FRACTION) if desc else ""
+            )
             round_data["prompt"] = _story_prompt(plain, 1)
             return round_data
         return None

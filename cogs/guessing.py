@@ -55,6 +55,8 @@ HINT_COOLDOWN = 2.0
 MAX_TEXT_HINTS = 3
 SONG_REVEAL_FRACTION = 1 / 7
 EVENT_REVEAL_FRACTION = 1 / 7
+# the description hint shows this fraction of its characters, the rest masked as underscores
+EVENT_DESC_FRACTION = 1 / 3
 
 # songs that don't work as a /guess music round; still fine for chart and jacket guessing
 MUSIC_GUESS_EXCLUDED = {674, 675, 676}
@@ -995,7 +997,9 @@ class GuessCog(commands.Cog):
                 event.bonus_attribute
             )  # raw, for the attribute emoji
             data["event_unit"] = await event_story.unit_display(self.bot.sbuga, event.id)  # type: ignore[arg-type]
-            data["event_desc"] = await event_story.event_outline(self.bot.sbuga, event.id)  # type: ignore[arg-type]
+            desc = await event_story.event_outline(self.bot.sbuga, event.id)  # type: ignore[arg-type]
+            # only a third of the description is revealed, the rest masked
+            data["event_desc"] = _masked_name(desc, EVENT_DESC_FRACTION) if desc else ""
             snippet = "\n".join(lines[: event_story.STAGE_LINES[1]])
             embed = embeds.embed(
                 title="Guess The Event Story", color=discord.Color.blue()
