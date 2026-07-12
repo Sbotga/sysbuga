@@ -1,10 +1,11 @@
 """fetch event story dialogue for the guess-the-event-story mode (english events only)
 
-the eventStories master maps each event to its story assetbundle and the scenario id of each
-episode. each scenario json holds TalkData, the dialogue. we pick a random english event with a
-story, concatenate its episodes into one run, take a stretch of consecutive lines (which can
-cross an episode boundary), and reveal more of that run per hint. the hint that fills the snippet
-out to 10 lines also names the event type, and the final hint names its bonus attribute and unit.
+the eventStories master maps each event to its story assetbundle, the scenario id of each episode,
+and an outline (the event description). each scenario json holds TalkData, the dialogue. we pick a
+random english event with a story, concatenate its episodes into one run, take a stretch of
+consecutive lines (which can cross an episode boundary), and reveal more of that run per hint. the
+hint that fills the snippet out to 10 lines also names the event type, the next names its bonus
+attribute and unit (from eventStoryUnits), and the last shows the event description.
 """
 
 from __future__ import annotations
@@ -19,12 +20,14 @@ if TYPE_CHECKING:
     from services.sbuga import SbugaClient
 
 # stage 1 is the opening snippet (4 lines); the next hints extend it to 7 then 10 lines, the
-# 10-line hint (stage 3) also names the event type, and the final hint (stage 4) names the bonus
-# attribute and unit
+# 10-line hint (stage 3) also names the event type, stage 4 names the bonus attribute and unit,
+# and stage 5 shows the event description
 STAGE_LINES = {1: 4, 2: 7, 3: 10}  # cumulative lines shown by each stage
 LAST_LINE_STAGE = 3
 TYPE_STAGE = 3  # the 10-line hint also names the event type
-MAX_STAGE = 4  # final hint names the bonus attribute and unit
+FACTS_STAGE = 4  # bonus attribute and unit
+DESC_STAGE = 5  # event description
+MAX_STAGE = 5
 MAX_LINES = STAGE_LINES[LAST_LINE_STAGE]
 
 # internal event type -> display name (world_bloom keeps its in-game name)
@@ -47,6 +50,12 @@ UNIT_NAMES = {
 _index: "dict[int, tuple[str, list[str]]] | None" = (
     None  # event id -> (assetbundle, scenario ids)
 )
+_outlines: dict[int, str] = (
+    {}
+)  # event id -> outline/description (filled with the index)
+_units: "dict[int, list[tuple[str, str]]] | None" = (
+    None  # event id -> [(unit, relation)] from eventStoryUnits
+)
 _lines_cache: dict[int, list[str]] = (
     {}
 )  # event id -> every episode's lines concatenated in order (lazy)
@@ -65,10 +74,49 @@ def attribute_display(attribute: "str | None") -> str:
     return attribute.title() if attribute else "Unknown"
 
 
-def unit_display(event_unit: "str | None") -> str:
-    """the unit shown on the fourth hint, from the event's `unit` field ("none"/None is a mixed
-    event and shows "Mixed")"""
-    return UNIT_NAMES.get(event_unit, "Mixed") if event_unit else "Mixed"
+async def _load_units(client: "SbugaClient") -> "dict[int, list[tuple[str, str]]]":
+    """eventStoryUnits maps each event's story to its featured units and whether each is the main
+    unit or a sub unit"""
+    global _units
+    if _units is not None:
+        return _units
+    async with _lock:
+        if _units is not None:
+            return _units
+        try:
+            raw = await client.get_master("eventStoryUnits", "en")
+        except Exception:
+            raw = []  # backend may not serve this file yet; fall back to "Mixed"
+        units: dict[int, list[tuple[str, str]]] = {}
+        for row in sorted(raw, key=lambda r: r.get("seq", 0)):
+            unit = row.get("unit")
+            if unit:
+                units.setdefault(int(row["eventStoryId"]), []).append(
+                    (unit, row.get("eventStoryUnitRelation", "sub"))
+                )
+        _units = units
+    return _units
+
+
+async def unit_display(client: "SbugaClient", event_id: int) -> str:
+    """the featured unit(s) shown on the fourth hint, from eventStoryUnits. a single main unit is
+    shown alone; multiple mains are listed and a trailing "Mixed" stands in for any sub units;
+    with no main unit at all the event is just "Mixed"."""
+    rows = (await _load_units(client)).get(event_id, [])
+    mains = [UNIT_NAMES.get(u, u) for u, rel in rows if rel == "main"]
+    has_subs = any(rel != "main" for _, rel in rows)
+    if not mains:
+        return "Mixed"
+    if len(mains) == 1:
+        return mains[0]
+    joined = ", ".join(mains)
+    return f"{joined} + Mixed" if has_subs else joined
+
+
+async def event_outline(client: "SbugaClient", event_id: int) -> str:
+    """the event's description/outline, shown on the final hint"""
+    await _load_index(client)
+    return _outlines.get(event_id, "")
 
 
 def lines_for_stage(stage: int) -> int:
@@ -87,6 +135,8 @@ async def _load_index(client: "SbugaClient") -> "dict[int, tuple[str, list[str]]
         raw = await client.get_master("eventStories", "en")
         idx: dict[int, tuple[str, list[str]]] = {}
         for es in raw:
+            eid = int(es["eventId"])
+            _outlines[eid] = (es.get("outline") or "").strip()
             ab = es.get("assetbundleName")
             sids = [
                 ep["scenarioId"]
@@ -94,7 +144,7 @@ async def _load_index(client: "SbugaClient") -> "dict[int, tuple[str, list[str]]
                 if ep.get("scenarioId")
             ]
             if ab and sids:
-                idx[int(es["eventId"])] = (ab, sids)
+                idx[eid] = (ab, sids)
         _index = idx
     return _index
 

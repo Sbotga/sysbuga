@@ -989,12 +989,13 @@ class GuessCog(commands.Cog):
             data["lines"] = lines
             data["stage"] = 1
             data["last_hint"] = 0.0
-            # the last two hints reveal these alongside/instead of more dialogue
+            # the last hints reveal these alongside/instead of more dialogue
             data["event_type"] = event_story.type_display(event.event_type)
-            data["event_attribute"] = event_story.attribute_display(
+            data["event_attribute"] = (
                 event.bonus_attribute
-            )
-            data["event_unit"] = event_story.unit_display(event.unit)
+            )  # raw, for the attribute emoji
+            data["event_unit"] = await event_story.unit_display(self.bot.sbuga, event.id)  # type: ignore[arg-type]
+            data["event_desc"] = await event_story.event_outline(self.bot.sbuga, event.id)  # type: ignore[arg-type]
             snippet = "\n".join(lines[: event_story.STAGE_LINES[1]])
             embed = embeds.embed(
                 title="Guess The Event Story", color=discord.Color.blue()
@@ -1293,10 +1294,9 @@ class GuessCog(commands.Cog):
     async def _story_hint(
         self, data: dict
     ) -> tuple[discord.Embed, list[discord.File], bool]:
-        """event hints extend the dialogue to 7 then 10 lines (the 10-line hint also names the
-        event type), then the final hint names the bonus attribute and unit, rate-limited. only
-        the new content is shown - earlier hints stay in the channel. past the last stage a hint
-        repeats everything
+        """event hints show the dialogue snippet grown to 7 then 10 lines (the 10-line hint also
+        names the event type), then the bonus attribute and unit, then the event description. each
+        hint shows everything revealed so far and is rate-limited; past the last stage it repeats
         """
         d = data["data"]
         stage = d.get("stage", 1)
@@ -1308,36 +1308,30 @@ class GuessCog(commands.Cog):
                 False,
             )
         d["last_hint"] = now
+        attr = d.get("event_attribute")
+        attr_emoji = emojis.attributes.get(attr, "") if attr else ""
+        attr_body = f"{attr_emoji} {event_story.attribute_display(attr)}".strip()
         type_line = f"**Event type:** {d.get('event_type', 'Unknown')}"
-        attr_line = f"**Event attribute:** {d.get('event_attribute', 'Unknown')}"
+        attr_line = f"**Event attribute:** {attr_body}"
         unit_line = f"**Event unit:** {d.get('event_unit', 'Mixed')}"
-        if stage >= event_story.MAX_STAGE:
-            snippet = (
-                "\n".join(d["lines"]) + f"\n\n{type_line}\n{attr_line}\n{unit_line}"
-            )
-            embed = embeds.embed(
-                title=f"Guess Hint - Stage {event_story.MAX_STAGE}/{event_story.MAX_STAGE}",
-                description=snippet,
-                color=discord.Color.yellow(),
-            )
-            return embed, [], False
-        stage += 1
-        d["stage"] = stage
-        if stage <= event_story.LAST_LINE_STAGE:
-            new_lines = d["lines"][
-                event_story.STAGE_LINES[stage - 1] : event_story.STAGE_LINES[stage]
-            ]
-            snippet = "\n".join(new_lines)
-            if stage == event_story.TYPE_STAGE:  # 10-line hint also names the type
-                snippet = f"{snippet}\n\n{type_line}"
-        else:  # final hint reveals the attribute and unit
-            snippet = f"{attr_line}\n{unit_line}"
+        desc = d.get("event_desc") or "*No description.*"
+        advanced = stage < event_story.MAX_STAGE
+        if advanced:
+            stage += 1
+            d["stage"] = stage
+        snippet = "\n".join(d["lines"][: event_story.lines_for_stage(stage)])
+        if stage >= event_story.TYPE_STAGE:  # 10-line hint also names the type
+            snippet += f"\n\n{type_line}"
+        if stage >= event_story.FACTS_STAGE:  # then the attribute and unit
+            snippet += f"\n{attr_line}\n{unit_line}"
+        if stage >= event_story.DESC_STAGE:  # the last hint adds the description
+            snippet += f"\n\n**Description:** {desc}"
         embed = embeds.embed(
             title=f"Guess Hint - Stage {stage}/{event_story.MAX_STAGE}",
             description=snippet,
             color=discord.Color.yellow(),
         )
-        return embed, [], True
+        return embed, [], advanced
 
     async def _tier_lines(
         self, data: dict, stage: int

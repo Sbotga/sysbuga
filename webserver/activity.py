@@ -144,17 +144,22 @@ def _story_prompt(
     event_type: "str | None" = None,
     event_attribute: "str | None" = None,
     event_unit: "str | None" = None,
+    event_desc: "str | None" = None,
 ) -> str:
     text = "Which event is this dialogue from?\n\n" + "\n".join(
         lines[: event_story.lines_for_stage(stage)]
     )
-    if stage >= event_story.TYPE_STAGE and event_type:  # third hint names the type
+    if stage >= event_story.TYPE_STAGE and event_type:  # 10-line hint names the type
         text += f"\n\nEvent type: {event_type}"
-    if stage >= event_story.MAX_STAGE:  # final hint adds the attribute and unit
+    if stage >= event_story.FACTS_STAGE:  # then the attribute and unit
         if event_attribute:
             text += f"\nEvent attribute: {event_attribute}"
         if event_unit:
             text += f"\nEvent unit: {event_unit}"
+    if (
+        stage >= event_story.DESC_STAGE and event_desc
+    ):  # the last hint adds the description
+        text += f"\n\nDescription: {event_desc}"
     return text
 
 
@@ -404,7 +409,8 @@ async def _build_round(
             round_data["event_attribute"] = event_story.attribute_display(
                 event.bonus_attribute
             )
-            round_data["event_unit"] = event_story.unit_display(event.unit)
+            round_data["event_unit"] = await event_story.unit_display(sbuga, event.id)
+            round_data["event_desc"] = await event_story.event_outline(sbuga, event.id)
             round_data["prompt"] = _story_prompt(plain, 1)
             return round_data
         return None
@@ -450,6 +456,7 @@ def _meta(
         meta["event_type"] = round_data.get("event_type") or "Unknown"
         meta["event_attribute"] = round_data.get("event_attribute") or "Unknown"
         meta["event_unit"] = round_data.get("event_unit") or "Mixed"
+        meta["event_desc"] = round_data.get("event_desc") or ""
     elif "stage" in round_data:  # music mode tracks audio-clip progression
         meta["stage"] = round_data["stage"]
         meta["max_stage"] = song_clip.MAX_STAGE
@@ -717,11 +724,12 @@ async def _story_hint(
     etype = meta.get("event_type")
     attr = meta.get("event_attribute")
     unit = meta.get("event_unit")
+    desc = meta.get("event_desc")
     if stage >= event_story.MAX_STAGE:
         return {
             "stage": stage,
             "max_stage": event_story.MAX_STAGE,
-            "dialogue": _story_prompt(lines, stage, etype, attr, unit),
+            "dialogue": _story_prompt(lines, stage, etype, attr, unit, desc),
             "done": True,
             "already": True,
         }
@@ -736,11 +744,11 @@ async def _story_hint(
     await redis_state.update_round(round_id, meta)
     if user_data:
         await user_data.add_guesses(user_id, meta["mode"], "hint")
-    # stage 4 adds the event type, stage 5 adds the bonus attribute and unit
+    # stage 3 adds the event type, stage 4 the attribute and unit, stage 5 the description
     return {
         "stage": stage,
         "max_stage": event_story.MAX_STAGE,
-        "dialogue": _story_prompt(lines, stage, etype, attr, unit),
+        "dialogue": _story_prompt(lines, stage, etype, attr, unit, desc),
         "done": stage >= event_story.MAX_STAGE,
     }
 
