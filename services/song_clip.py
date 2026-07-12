@@ -1,8 +1,8 @@
 """cut short audio snippets out of a song for the guess the music mode
 
-a round fixes one window start and each hint reveals a longer clip from it, 1s then 3s then 5s,
-and the last hint keeps the 5s clip but reveals the cover type. cutting a nosil (silence-trimmed)
-vocal so the window lands on actual audio. the full track is kept for the reveal.
+a round fixes one window start and each hint reveals a longer clip from it, 1s then 3s then 5s
+then 8s, and the last hint also reveals the cover type. cutting a nosil (silence-trimmed) vocal
+so the window lands on actual audio. the full track is kept for the reveal.
 """
 
 from __future__ import annotations
@@ -17,9 +17,9 @@ _TMP_BASE = Path(tempfile.gettempdir()) / "sbuga_song_clips"
 
 CLIP_START_MIN = 5.0  # cut at least this far from the song's start
 CLIP_END_MARGIN = 20.0  # ...and the cut point at least this far from its end
-FULL_SECONDS = 5.0  # the longest clip length (the final hint reveals the cover type, not more audio)
-# stage -> seconds of the window revealed; stage 4 keeps stage 3's length and adds the cover type
-STAGE_SECONDS = {1: 1.0, 2: 3.0, 3: 5.0, 4: 5.0}
+FULL_SECONDS = 8.0  # the longest clip length, revealed on the final hint
+# stage -> seconds of the window revealed; stage 4 is the longest clip and adds the cover type
+STAGE_SECONDS = {1: 1.0, 2: 3.0, 3: 5.0, 4: 8.0}
 MAX_STAGE = 4
 
 # japanese vocal captions normalized to english (see sbuga-sonolus-server music api)

@@ -354,6 +354,10 @@ class PJSKData:
     def best_event_id(self, query: str) -> int | None:
         return search.best_event_match(query)
 
+    def best_event_id_key(self, query: str) -> tuple[int, str] | None:
+        """the matched event id plus the key (name or alias) that matched it"""
+        return search.best_event_match_key(query)
+
     def get_play_level(self, music_id: int, difficulty: str) -> int | None:
         music = self.get_music(music_id)
         if not music:

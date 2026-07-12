@@ -375,8 +375,9 @@ def _index_music(
     for k in auto_pp:
         playlist_auto_map.setdefault(k, set()).update(mid_list)
 
+    # the id only goes in the search map for the autocomplete; the playlist matcher resolves an
+    # id through an exact lookup, so keeping it out here stops a wrong number fuzzy matching a song
     _add_keys(search_map, [str(music.id)], all_level_keys)
-    _add_playlist_keys(playlist_map, [str(music.id)], mid_list)
 
     # People (artist/lyricist/composer/arranger) only go in the *search* map.
     # The playlist map resolves a name to one song, and a person's name is not a
@@ -569,7 +570,9 @@ def _index_event(
     event_alias_map: dict[str, set[int]],
     event_auto_map: dict[str, set[int]],
 ) -> None:
-    real = [event.name, str(event.id)]
+    # the bare id is matched through an exact lookup, not this fuzzy map, so a wrong number can't
+    # resolve to an event here
+    real = [event.name]
     if event.pronunciation:
         real.append(event.pronunciation)
     for name in (event.name, event.pronunciation):
@@ -807,12 +810,19 @@ def best_song_match(query: str, sensitivity: float = DEFAULT_SENSITIVITY) -> int
     return hit[0] if hit else None
 
 
+def best_event_match_key(
+    query: str, sensitivity: float = DEFAULT_SENSITIVITY
+) -> tuple[int, str] | None:
+    """the matched event id along with the key (name or alias) that matched it"""
+    return _best_entity(
+        _event_map, _event_alias_map, _event_auto_map, query, sensitivity
+    )
+
+
 def best_event_match(
     query: str, sensitivity: float = DEFAULT_SENSITIVITY
 ) -> int | None:
-    hit = _best_entity(
-        _event_map, _event_alias_map, _event_auto_map, query, sensitivity
-    )
+    hit = best_event_match_key(query, sensitivity)
     return hit[0] if hit else None
 
 

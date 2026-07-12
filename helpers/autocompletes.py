@@ -18,7 +18,7 @@ GUESSING_TYPES = {
     "Chart Append": "chart_append",
     "Chart Expert": "chart_expert",
     "Event": "event",
-    "Event Story": "event_story",
+    "Event Background": "event_background",
     "Song Note Count": "notes",
     "Music": "music",
 }

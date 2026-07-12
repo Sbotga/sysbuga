@@ -68,6 +68,34 @@ def match_event(pjsk: PJSKData, arg: str | int | None) -> Event | None:
     return pjsk.get_event(eid) if eid is not None else None
 
 
+def match_event_with_key(
+    pjsk: PJSKData, arg: str | int | None
+) -> tuple[Event, str] | None:
+    """The matched event plus the key (name or alias) the query actually hit."""
+    if arg is None:
+        return None
+    q = str(arg).strip()
+    if q.isdigit():
+        event = pjsk.get_event(int(q))
+        if event:
+            return event, q
+    hit = pjsk.best_event_id_key(q)
+    if hit is None:
+        return None
+    eid, key = hit
+    event = pjsk.get_event(eid)
+    return (event, key) if event else None
+
+
+def describe_event_match(name: str, key: str) -> str:
+    """`Name`, plus the alias that matched — omitted when it *is* the name."""
+    from data.search import preprocess
+
+    if preprocess(key) == preprocess(name):
+        return f"**`{name}`**"
+    return f"**`{name}`** (`{key}`)"
+
+
 def match_character(pjsk: PJSKData, arg: str | int | None) -> Character | None:
     if arg is None:
         return None

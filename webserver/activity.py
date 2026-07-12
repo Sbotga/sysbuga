@@ -10,6 +10,7 @@ from collections import OrderedDict
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
+import discord
 from fastapi import (
     APIRouter,
     Header,
@@ -61,11 +62,9 @@ MODES: dict[str, str] = {
     "character": "Character",
     "character_bw": "Character (grayscale)",
     "event": "Event",
-    "event_story": "Event Story",
+    "event_background": "Event (Background)",
     "music": "Music",
 }
-# dialogue lines carry markdown for discord; the activity renders plain text
-_STRIP_MD = str.maketrans("", "", "*")
 
 router = APIRouter(prefix="/api/activity")
 
@@ -139,10 +138,23 @@ def _egg_prompt(descriptions: list[str]) -> str:
     return "⚠️ EASTER EGG! " + " ".join(descriptions)
 
 
-def _story_prompt(lines: list[str], count: int, unit: "str | None" = None) -> str:
-    text = "Which event is this dialogue from?\n\n" + "\n".join(lines[:count])
-    if unit:
-        text += f"\n\nEvent unit: {unit}"
+def _story_prompt(
+    lines: list[str],
+    stage: int,
+    event_type: "str | None" = None,
+    event_attribute: "str | None" = None,
+    event_unit: "str | None" = None,
+) -> str:
+    text = "Which event is this dialogue from?\n\n" + "\n".join(
+        lines[: event_story.lines_for_stage(stage)]
+    )
+    if stage >= event_story.TYPE_STAGE and event_type:  # third hint names the type
+        text += f"\n\nEvent type: {event_type}"
+    if stage >= event_story.MAX_STAGE:  # final hint adds the attribute and unit
+        if event_attribute:
+            text += f"\nEvent attribute: {event_attribute}"
+        if event_unit:
+            text += f"\nEvent unit: {event_unit}"
     return text
 
 
@@ -340,7 +352,7 @@ async def _build_round(
         ).getvalue()
         return round_data
 
-    if mode == "event":
+    if mode == "event_background":
         events = [
             e
             for e in pjsk.events()
@@ -363,7 +375,7 @@ async def _build_round(
         ).getvalue()
         return round_data
 
-    if mode == "event_story":
+    if mode == "event":
         try:
             eligible = await event_story.eligible_event_ids(sbuga)
         except Exception:
@@ -379,7 +391,8 @@ async def _build_round(
             if not lines:
                 continue
             event = pjsk.get_event(eid)
-            plain = [line.translate(_STRIP_MD) for line in lines]
+            # the activity renders plain text, so strip the discord bold + escapes
+            plain = [discord.utils.remove_markdown(line) for line in lines]
             url = event.background_url or event.banner_url
             round_data["type"] = "event"
             round_data["answer_id"] = event.id
@@ -387,8 +400,12 @@ async def _build_round(
             round_data["reveal"] = await _safe_fetch(url) if url else None
             round_data["lines"] = plain
             round_data["stage"] = 1
-            round_data["unit"] = event_story.unit_display(event.unit)
-            round_data["prompt"] = _story_prompt(plain, event_story.STAGE_LINES[1])
+            round_data["event_type"] = event_story.type_display(event.event_type)
+            round_data["event_attribute"] = event_story.attribute_display(
+                event.bonus_attribute
+            )
+            round_data["event_unit"] = event_story.unit_display(event.unit)
+            round_data["prompt"] = _story_prompt(plain, 1)
             return round_data
         return None
 
@@ -397,7 +414,7 @@ async def _build_round(
 
 def _match(pjsk: "PJSKData", round_data: dict[str, Any], guess: str):
     """returns id, display name, matched key where the key is the alias the query actually hit
-    and it's the display name itself for non-song rounds"""
+    and it's the display name itself for character rounds"""
     if round_data["type"] == "song":
         hit = converters.match_song_with_key(pjsk, guess)
         return (hit[0].id, hit[0].title, hit[1]) if hit else None
@@ -405,8 +422,8 @@ def _match(pjsk: "PJSKData", round_data: dict[str, Any], guess: str):
         char = converters.match_character(pjsk, guess)
         name = character_display_name(char) if char else ""
         return (char.id, name, name) if char else None
-    event = converters.match_event(pjsk, guess)
-    return (event.id, event.name, event.name) if event else None
+    hit = converters.match_event_with_key(pjsk, guess)
+    return (hit[0].id, hit[0].name, hit[1]) if hit else None
 
 
 def _meta(
@@ -425,12 +442,14 @@ def _meta(
         "user_id": user_id,
         "finished": False,
     }
-    if round_data.get("mode") == "event_story":  # staged dialogue snippet
+    if round_data.get("mode") == "event":  # staged dialogue snippet
         meta["stage"] = round_data["stage"]
         meta["max_stage"] = event_story.MAX_STAGE
         meta["last_hint"] = 0.0
         meta["lines"] = round_data["lines"]
-        meta["unit"] = round_data.get("unit") or "Mixed"
+        meta["event_type"] = round_data.get("event_type") or "Unknown"
+        meta["event_attribute"] = round_data.get("event_attribute") or "Unknown"
+        meta["event_unit"] = round_data.get("event_unit") or "Mixed"
     elif "stage" in round_data:  # music mode tracks audio-clip progression
         meta["stage"] = round_data["stage"]
         meta["max_stage"] = song_clip.MAX_STAGE
@@ -519,7 +538,7 @@ async def start_round(
         "expires_at": expires_at,
         "giveup_at": now + _giveup_seconds(body.mode),
     }
-    if "stage" in meta:  # staged modes (music, event_story)
+    if "stage" in meta:  # staged modes (music, event)
         resp["stage"] = meta["stage"]
         resp["max_stage"] = meta["max_stage"]
     else:  # tiered text hints where give-up needs all of them used
@@ -570,7 +589,7 @@ async def hint(
     user_data = _user_data(request.app.state)
     if meta["mode"] == "music":
         return await _music_hint(body.round_id, meta, user_id, user_data)
-    if meta["mode"] == "event_story":
+    if meta["mode"] == "event":
         return await _story_hint(body.round_id, meta, user_id, user_data)
     return await _tiered_hint(body.round_id, meta, user_id, user_data)
 
@@ -695,13 +714,14 @@ async def _story_hint(
 ) -> dict[str, Any]:
     stage = meta.get("stage", 1)
     lines = meta.get("lines", [])
+    etype = meta.get("event_type")
+    attr = meta.get("event_attribute")
+    unit = meta.get("event_unit")
     if stage >= event_story.MAX_STAGE:
         return {
             "stage": stage,
             "max_stage": event_story.MAX_STAGE,
-            "dialogue": _story_prompt(
-                lines, event_story.STAGE_LINES[stage], meta.get("unit")
-            ),
+            "dialogue": _story_prompt(lines, stage, etype, attr, unit),
             "done": True,
             "already": True,
         }
@@ -716,12 +736,11 @@ async def _story_hint(
     await redis_state.update_round(round_id, meta)
     if user_data:
         await user_data.add_guesses(user_id, meta["mode"], "hint")
-    # the final stage also names the event's unit
-    unit = meta.get("unit") if stage >= event_story.MAX_STAGE else None
+    # stage 4 adds the event type, stage 5 adds the bonus attribute and unit
     return {
         "stage": stage,
         "max_stage": event_story.MAX_STAGE,
-        "dialogue": _story_prompt(lines, event_story.STAGE_LINES[stage], unit),
+        "dialogue": _story_prompt(lines, stage, etype, attr, unit),
         "done": stage >= event_story.MAX_STAGE,
     }
 
@@ -738,7 +757,7 @@ async def reveal_answer(
     if not meta or meta["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="no active round")
     # can't give up until enough time has passed and at least one hint has been used
-    if meta["mode"] in ("music", "event_story"):
+    if meta["mode"] in ("music", "event"):
         hint_used = meta.get("stage", 1) >= 2
     else:
         hint_used = meta.get("hint_stage", 0) >= 1

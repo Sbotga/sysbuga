@@ -288,7 +288,7 @@ class SongInfo(commands.Cog):
             f"{self.bot.sbuga.base}/api/tools/chart_viewer"  # type: ignore[union-attr]
             f"?music_id={music.id}&difficulty={diff}&region={used_region}&mirrored={str(bool(mirror)).lower()}"
         )
-        view = LinkButtonView([("Open Chart", url)])
+        view = LinkButtonView([("Chart Image", url)])
         await interaction.followup.send(
             embed=embed, file=discord.File(BytesIO(chart_bytes), "chart.png"), view=view
         )
@@ -414,7 +414,7 @@ class SongInfo(commands.Cog):
             sonolus_url = f"{get_config()['sbuga']['sonolus_url']}/playlists/sss-custom-{region}-{chart_id}"
         buttons = []
         if not hide_chart:
-            buttons.append(("Open Chart", url))
+            buttons.append(("Chart Image", url))
         # if sonolus_url:
         #     buttons.append(("Play On Sonolus", sonolus_url))
         if buttons:

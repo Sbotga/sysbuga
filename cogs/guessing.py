@@ -34,15 +34,20 @@ MODE_TIME = {
     "chart_append": 90,
     "chart_expert": 90,
     "music": 300,
-    "event_story": 180,
+    "event": 180,
 }
 # modes whose hints extend a snippet by stage (like music) rather than adding tiered facts
-STAGED_MODES = {"music", "event_story"}
+STAGED_MODES = {"music", "event"}
 GUESS_PREFIX = "-"
 # appended to every not-found or wrong-guess reply
 GUESS_TIP = "\n-# Use `-hint` for a hint, `-end` to give up, or `-time` for time left!"
 # music mode variant where a hint reveals more of the song rather than a fact
 MUSIC_TIP = "\n-# Use `-hint` to provide more of the song, or `-time` for time left!"
+# XXX: temporary
+EVENT_ALIAS_PLUG = (
+    "\n-# Events are new to the bot and need aliases! "
+    "Help suggest aliases in support server."
+)
 # a hint can't fire within this many seconds of the previous one
 HINT_COOLDOWN = 2.0
 # non-music modes get three cumulative text hints and the last reveals this fraction of the
@@ -670,23 +675,28 @@ class GuessCog(commands.Cog):
     async def _check_event(
         self, message: discord.Message, data: dict, content: str
     ) -> None:
-        event = converters.match_event(self.bot.pjsk, content)  # type: ignore[arg-type]
+        hit = converters.match_event_with_key(self.bot.pjsk, content)  # type: ignore[arg-type]
         if self.guess_ended(self.bot, data):
             return
-        if not event:
+        if not hit:
             await message.reply(
                 embed=embeds.error_embed(
-                    f"Couldn't find an event matching `{content}`." + GUESS_TIP,
+                    f"Couldn't find an event matching `{content}`."
+                    + GUESS_TIP
+                    + EVENT_ALIAS_PLUG,
                     title="Incorrect",
                 )
             )
             return
+        event, key = hit
         if event.id == data["answer"]:
             await self._award(message, data)
         else:
             await message.reply(
                 embed=embeds.error_embed(
-                    f"Incorrectly guessed **`{event.name}`**." + GUESS_TIP,
+                    f"Incorrectly guessed {converters.describe_event_match(event.name, key)}."
+                    + GUESS_TIP
+                    + EVENT_ALIAS_PLUG,
                     title="Incorrect",
                 )
             )
@@ -733,7 +743,7 @@ class GuessCog(commands.Cog):
                     embed=embeds.embed(
                         title="Guess The Chart",
                         description="Rendering the chart clip… (~10 seconds)",
-                        color=discord.Color.dark_gold(),
+                        color=discord.Color.blue(),
                     )
                 )
             embed, file = await self._build_round(interaction, mode, guess)
@@ -804,9 +814,7 @@ class GuessCog(commands.Cog):
             data["clip_task"] = asyncio.create_task(
                 self._gen_music_clips(data, audio, start)
             )
-            embed = embeds.embed(
-                title="Guess The Music", color=discord.Color.dark_gold()
-            )
+            embed = embeds.embed(title="Guess The Music", color=discord.Color.blue())
             embed.description = (
                 f"Guess the song from a {int(song_clip.STAGE_SECONDS[1])} second clip.\n"
                 f"Use `{GUESS_PREFIX}your guess` to guess, `{GUESS_PREFIX}hint` to hear more "
@@ -838,9 +846,7 @@ class GuessCog(commands.Cog):
                 jacket = await _fetch_bytes(music.jacket_url)
                 if jacket:
                     guess["data"]["thumbnail"] = io.BytesIO(jacket)
-                embed = embeds.embed(
-                    title="Guess The Song", color=discord.Color.dark_gold()
-                )
+                embed = embeds.embed(title="Guess The Song", color=discord.Color.blue())
                 embed.description = (
                     f"Guess the song from its Master note count.\nUse `{GUESS_PREFIX}your guess` to guess, `{GUESS_PREFIX}hint` for a hint, `{GUESS_PREFIX}end` to give up, or `{GUESS_PREFIX}time` for time left. You have {secs} seconds.\n\n"
                     f"# This song has `{master.total_note_count}` notes on Master."
@@ -864,7 +870,7 @@ class GuessCog(commands.Cog):
                     ):  # cached clips also reveal a jacket and audio video
                         guess["data"]["answer_video"] = answer_video
                     embed = embeds.embed(
-                        title="Guess The Chart", color=discord.Color.dark_gold()
+                        title="Guess The Chart", color=discord.Color.blue()
                     )
                     embed.description = (
                         f"Guess the song from a ~10 second {diff} chart clip.\n"
@@ -883,7 +889,7 @@ class GuessCog(commands.Cog):
                 guess["answer_file_path"] = io.BytesIO(png)
                 cropped = await unblock.to_process_with_timeout(_crop_chart, png)
                 embed = embeds.embed(
-                    title="Guess The Chart", color=discord.Color.dark_gold()
+                    title="Guess The Chart", color=discord.Color.blue()
                 )
                 embed.set_image(url="attachment://image.png")
                 embed.description = (
@@ -920,9 +926,7 @@ class GuessCog(commands.Cog):
             cropped = await unblock.to_process_with_timeout(
                 _crop_square, jacket, size, bw
             )
-            embed = embeds.embed(
-                title="Guess The Song", color=discord.Color.dark_gold()
-            )
+            embed = embeds.embed(title="Guess The Song", color=discord.Color.blue())
             embed.set_image(url="attachment://image.png")
             embed.description = f"{label}\nUse `{GUESS_PREFIX}your guess` to guess, `{GUESS_PREFIX}hint` for a hint, `{GUESS_PREFIX}end` to give up, or `{GUESS_PREFIX}time` for time left. You have {secs} seconds."
             return embed, discord.File(cropped, "image.png")
@@ -948,13 +952,13 @@ class GuessCog(commands.Cog):
                 _crop_square, art, 250, mode == "character_bw"
             )
             embed = embeds.embed(
-                title="Guess The Character", color=discord.Color.dark_gold()
+                title="Guess The Character", color=discord.Color.blue()
             )
             embed.set_image(url="attachment://image.png")
             embed.description = f"Guess the character from a cropped card.\nUse `{GUESS_PREFIX}your guess` to guess, `{GUESS_PREFIX}hint` for a hint, `{GUESS_PREFIX}end` to give up, or `{GUESS_PREFIX}time` for time left. You have {secs} seconds."
             return embed, discord.File(cropped, "image.png")
 
-        if mode == "event":
+        if mode == "event_background":
             guess["guessType"] = "event"
             hit = await self._pick_event_background()
             if not hit:
@@ -966,14 +970,12 @@ class GuessCog(commands.Cog):
             cropped = await unblock.to_process_with_timeout(
                 _crop_square, bg, 250, False
             )
-            embed = embeds.embed(
-                title="Guess The Event", color=discord.Color.dark_gold()
-            )
+            embed = embeds.embed(title="Guess The Event", color=discord.Color.blue())
             embed.set_image(url="attachment://image.png")
             embed.description = f"Guess the event from a cropped background.\nUse `{GUESS_PREFIX}your guess` to guess, `{GUESS_PREFIX}hint` for a hint, `{GUESS_PREFIX}end` to give up, or `{GUESS_PREFIX}time` for time left. You have {secs} seconds."
             return embed, discord.File(cropped, "image.png")
 
-        if mode == "event_story":
+        if mode == "event":
             guess["guessType"] = "event"
             hit = await self._pick_event_story()
             if not hit:
@@ -987,11 +989,15 @@ class GuessCog(commands.Cog):
             data["lines"] = lines
             data["stage"] = 1
             data["last_hint"] = 0.0
-            # unit revealed on the final hint ("none" -> "Mixed")
-            data["unit"] = event_story.unit_display(event.unit)
+            # the last two hints reveal these alongside/instead of more dialogue
+            data["event_type"] = event_story.type_display(event.event_type)
+            data["event_attribute"] = event_story.attribute_display(
+                event.bonus_attribute
+            )
+            data["event_unit"] = event_story.unit_display(event.unit)
             snippet = "\n".join(lines[: event_story.STAGE_LINES[1]])
             embed = embeds.embed(
-                title="Guess The Event Story", color=discord.Color.dark_gold()
+                title="Guess The Event Story", color=discord.Color.blue()
             )
             embed.description = (
                 f"Which event is this dialogue from?\n\n{snippet}\n\n"
@@ -1065,10 +1071,11 @@ class GuessCog(commands.Cog):
         await self.handle_guess(interaction, "chart_expert")
 
     @guess.command(
-        name="event", description="Guess the event from a cropped background."
+        name="event_background",
+        description="Guess the event from a cropped background.",
     )
-    async def event(self, interaction: discord.Interaction) -> None:
-        await self.handle_guess(interaction, "event")
+    async def event_background(self, interaction: discord.Interaction) -> None:
+        await self.handle_guess(interaction, "event_background")
 
     @guess.command(
         name="notes", description="Guess the song from its Master note count."
@@ -1081,11 +1088,11 @@ class GuessCog(commands.Cog):
         await self.handle_guess(interaction, "music")
 
     @guess.command(
-        name="event_story",
+        name="event",
         description="Guess the event from a snippet of its story dialogue.",
     )
-    async def guess_event_story(self, interaction: discord.Interaction) -> None:
-        await self.handle_guess(interaction, "event_story")
+    async def event(self, interaction: discord.Interaction) -> None:
+        await self.handle_guess(interaction, "event")
 
     async def _resolve_end(
         self, channel_id: int, user_id: int
@@ -1139,6 +1146,8 @@ class GuessCog(commands.Cog):
                 None,
             )
         self.remove_guess(self.bot, channel_id)
+        if data["guessing"]:
+            await self.bot.user_data.add_guesses(user_id, data["guessing"], "ragequit")  # type: ignore[union-attr]
         embed = embeds.embed(
             title="Guess Ended",
             description=f"The answer was **{data['answerName']}**.",
@@ -1229,21 +1238,10 @@ class GuessCog(commands.Cog):
     async def _music_hint(
         self, data: dict
     ) -> tuple[discord.Embed, list[discord.File], bool]:
-        """music hints reveal a longer prefix of the clip from stage 1 to 4 and are rate-limited"""
+        """music hints reveal a longer prefix of the clip from stage 1 to 4 and are rate-limited.
+        past the last stage a hint just repeats the full clip"""
         d = data["data"]
         stage = d.get("stage", 1)
-        if stage >= song_clip.MAX_STAGE:
-            return (
-                embeds.embed(
-                    title=f"Guess Hint - Stage {song_clip.MAX_STAGE}/{song_clip.MAX_STAGE}",
-                    description=(
-                        f"The {int(song_clip.FULL_SECONDS)} second song is already provided."
-                    ),
-                    color=discord.Color.red(),
-                ),
-                [],
-                False,
-            )
         now = time.time()
         if now - d.get("last_hint", 0.0) < HINT_COOLDOWN:
             return (
@@ -1252,6 +1250,27 @@ class GuessCog(commands.Cog):
                 False,
             )
         d["last_hint"] = now  # set before the cut so a rapid second hint is rejected
+        if stage >= song_clip.MAX_STAGE:
+            clip = await self._music_clip(d, song_clip.MAX_STAGE)
+            if clip is None:
+                return embeds.error_embed("Couldn't extend the clip."), [], False
+            desc = f"Here's {int(song_clip.FULL_SECONDS)} seconds of the song."
+            if d.get("cover_type"):
+                desc += f"\nCover type: **{d['cover_type']}**"
+            embed = embeds.embed(
+                title=f"Guess Hint - Stage {song_clip.MAX_STAGE}/{song_clip.MAX_STAGE}",
+                description=desc,
+                color=discord.Color.yellow(),
+            )
+            return (
+                embed,
+                [
+                    discord.File(
+                        io.BytesIO(clip), song_clip.clip_filename(song_clip.MAX_STAGE)
+                    )
+                ],
+                False,
+            )
         stage += 1
         d["stage"] = stage
         clip = await self._music_clip(d, stage)
@@ -1263,7 +1282,7 @@ class GuessCog(commands.Cog):
         embed = embeds.embed(
             title=f"Guess Hint - Stage {stage}/{song_clip.MAX_STAGE}",
             description=desc,
-            color=discord.Color.red(),
+            color=discord.Color.yellow(),
         )
         return (
             embed,
@@ -1274,19 +1293,13 @@ class GuessCog(commands.Cog):
     async def _story_hint(
         self, data: dict
     ) -> tuple[discord.Embed, list[discord.File], bool]:
-        """event-story hints reveal more dialogue lines (stage 1 to 4), rate-limited"""
+        """event hints extend the dialogue to 7 then 10 lines (the 10-line hint also names the
+        event type), then the final hint names the bonus attribute and unit, rate-limited. only
+        the new content is shown - earlier hints stay in the channel. past the last stage a hint
+        repeats everything
+        """
         d = data["data"]
         stage = d.get("stage", 1)
-        if stage >= event_story.MAX_STAGE:
-            return (
-                embeds.embed(
-                    title=f"Guess Hint - Stage {event_story.MAX_STAGE}/{event_story.MAX_STAGE}",
-                    description="All the dialogue lines are already shown.",
-                    color=discord.Color.red(),
-                ),
-                [],
-                False,
-            )
         now = time.time()
         if now - d.get("last_hint", 0.0) < HINT_COOLDOWN:
             return (
@@ -1295,15 +1308,34 @@ class GuessCog(commands.Cog):
                 False,
             )
         d["last_hint"] = now
+        type_line = f"**Event type:** {d.get('event_type', 'Unknown')}"
+        attr_line = f"**Event attribute:** {d.get('event_attribute', 'Unknown')}"
+        unit_line = f"**Event unit:** {d.get('event_unit', 'Mixed')}"
+        if stage >= event_story.MAX_STAGE:
+            snippet = (
+                "\n".join(d["lines"]) + f"\n\n{type_line}\n{attr_line}\n{unit_line}"
+            )
+            embed = embeds.embed(
+                title=f"Guess Hint - Stage {event_story.MAX_STAGE}/{event_story.MAX_STAGE}",
+                description=snippet,
+                color=discord.Color.yellow(),
+            )
+            return embed, [], False
         stage += 1
         d["stage"] = stage
-        snippet = "\n".join(d["lines"][: event_story.STAGE_LINES[stage]])
-        if stage >= event_story.MAX_STAGE:
-            snippet += f"\n\n**Event unit:** {d.get('unit', 'Mixed')}"
+        if stage <= event_story.LAST_LINE_STAGE:
+            new_lines = d["lines"][
+                event_story.STAGE_LINES[stage - 1] : event_story.STAGE_LINES[stage]
+            ]
+            snippet = "\n".join(new_lines)
+            if stage == event_story.TYPE_STAGE:  # 10-line hint also names the type
+                snippet = f"{snippet}\n\n{type_line}"
+        else:  # final hint reveals the attribute and unit
+            snippet = f"{attr_line}\n{unit_line}"
         embed = embeds.embed(
             title=f"Guess Hint - Stage {stage}/{event_story.MAX_STAGE}",
             description=snippet,
-            color=discord.Color.red(),
+            color=discord.Color.yellow(),
         )
         return embed, [], True
 
@@ -1374,14 +1406,14 @@ class GuessCog(commands.Cog):
         revealed so far"""
         if data["guessing"] == "music":
             return await self._music_hint(data)
-        if data["guessing"] == "event_story":
+        if data["guessing"] == "event":
             return await self._story_hint(data)
         if data["guessType"] not in ("song", "character", "event"):
             return (
                 embeds.embed(
                     title="Unsupported Hint",
                     description="Ongoing guess does not support hints.",
-                    color=discord.Color.red(),
+                    color=discord.Color.yellow(),
                 ),
                 [],
                 False,
@@ -1406,7 +1438,7 @@ class GuessCog(commands.Cog):
         embed = embeds.embed(
             title=f"Guess Hint - Stage {stage}/{MAX_TEXT_HINTS}",
             description="\n".join(lines),
-            color=discord.Color.red(),
+            color=discord.Color.yellow(),
         )
         if any(f.filename == "image.png" for f in files):
             embed.set_image(url="attachment://image.png")
@@ -1445,7 +1477,7 @@ class GuessCog(commands.Cog):
         target = user or interaction.user
         await interaction.response.defer(thinking=True)
         all_stats = await self.bot.user_data.get_guesses(target.id)  # type: ignore[union-attr]
-        totals = {"success": 0, "fail": 0, "hint": 0}
+        totals = {"success": 0, "fail": 0, "hint": 0, "ragequit": 0}
         for value in all_stats.values():
             for k in totals:
                 totals[k] += value.get(k, 0)
@@ -1457,7 +1489,8 @@ class GuessCog(commands.Cog):
         )
         embed.description = (
             f"**Correct:** `{totals['success']:,}`\n**Incorrect:** `{totals['fail']:,}`\n"
-            f"**Accuracy:** `{rate}`\n**Hints used:** `{totals['hint']:,}`"
+            f"**Accuracy:** `{rate}`\n**Hints used:** `{totals['hint']:,}`\n"
+            f"**Guesses ended:** `{totals['ragequit']:,}`"
         )
         await interaction.followup.send(embed=embed)
 
@@ -1503,7 +1536,7 @@ class _GuessResultView(SbugaView):
     each info button just reuses the existing slash command's callback"""
 
     def __init__(self, cog: "GuessCog", data: dict) -> None:
-        super().__init__(timeout=15)  # matches the original bot's button timeout
+        super().__init__(timeout=30)  # how long the result buttons stay active
         self.cog = cog
         self.data = data
         if data["guessType"] == "song":
@@ -1513,6 +1546,8 @@ class _GuessResultView(SbugaView):
             if data["data"].get("card_id"):
                 self._add("View Card", self._view_card)
             self._add("Character Info", self._character_info)
+        elif data["guessType"] == "event":
+            self._add("Event Aliases", self._event_aliases)
 
     def _add(self, label: str, handler) -> None:
         button = discord.ui.Button(label=label, style=discord.ButtonStyle.gray)
@@ -1558,6 +1593,11 @@ class _GuessResultView(SbugaView):
 
     async def _song_aliases(self, interaction: discord.Interaction) -> None:
         await self._invoke(interaction, "SongInfo", "aliases", str(self.data["answer"]))
+
+    async def _event_aliases(self, interaction: discord.Interaction) -> None:
+        await self._invoke(
+            interaction, "EventsCog", "aliases", str(self.data["answer"])
+        )
 
     async def _character_info(self, interaction: discord.Interaction) -> None:
         await self._invoke(
