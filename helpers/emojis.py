@@ -13,7 +13,7 @@ FIELDS = (
     "fc",
     "clear",
     "none",
-    "mikuleak",
+    "mikuleek",
 )
 
 
@@ -29,7 +29,7 @@ class Emojis:
         self.clear = "normal_clear"
         self.none = "normal_fail"
 
-        self.mikuleak = "mikuleak"  # resolves to the mention once uploaded
+        self.mikuleek = "mikuleek"  # resolves to the mention once uploaded
 
         self.difficulty_colors = {
             "easy": "easy_color",

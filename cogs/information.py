@@ -364,7 +364,7 @@ class InfoCog(commands.Cog):
     @alias_music.command(
         name="list", description="Authorized only; view a song's aliases."
     )
-    @app_commands.autocomplete(song=autocompletes.pjsk_song)
+    @app_commands.autocomplete(song=autocompletes.pjsk_song_alias)
     @app_commands.describe(song="Song name or ID.")
     async def music_list(self, interaction: discord.Interaction, song: str) -> None:
         if await self._deny_alias(interaction):
@@ -388,7 +388,7 @@ class InfoCog(commands.Cog):
         await interaction.followup.send(embed=embed)
 
     @alias_music.command(name="add", description="Authorized only; add a song alias.")
-    @app_commands.autocomplete(song=autocompletes.pjsk_song)
+    @app_commands.autocomplete(song=autocompletes.pjsk_song_alias)
     @app_commands.describe(song="Song name or ID.", alias="Alias to add.")
     async def music_add(
         self, interaction: discord.Interaction, song: str, alias: str
@@ -426,7 +426,7 @@ class InfoCog(commands.Cog):
     @alias_music.command(
         name="remove", description="Authorized only; remove a song alias."
     )
-    @app_commands.autocomplete(song=autocompletes.pjsk_song)
+    @app_commands.autocomplete(song=autocompletes.pjsk_song_alias)
     @app_commands.describe(song="Song name or ID.", alias="Alias to remove.")
     async def music_remove(
         self, interaction: discord.Interaction, song: str, alias: str
@@ -472,7 +472,7 @@ class InfoCog(commands.Cog):
     @alias_event.command(
         name="list", description="Authorized only; view an event's aliases."
     )
-    @app_commands.autocomplete(event=autocompletes.pjsk_event)
+    @app_commands.autocomplete(event=autocompletes.pjsk_event_alias)
     @app_commands.describe(event="Event name or ID.")
     async def event_list(self, interaction: discord.Interaction, event: str) -> None:
         if await self._deny_alias(interaction):
@@ -496,7 +496,7 @@ class InfoCog(commands.Cog):
         await interaction.followup.send(embed=embed)
 
     @alias_event.command(name="add", description="Authorized only; add an event alias.")
-    @app_commands.autocomplete(event=autocompletes.pjsk_event)
+    @app_commands.autocomplete(event=autocompletes.pjsk_event_alias)
     @app_commands.describe(event="Event name or ID.", alias="Alias to add.")
     async def event_add(
         self, interaction: discord.Interaction, event: str, alias: str
@@ -534,7 +534,7 @@ class InfoCog(commands.Cog):
     @alias_event.command(
         name="remove", description="Authorized only; remove an event alias."
     )
-    @app_commands.autocomplete(event=autocompletes.pjsk_event)
+    @app_commands.autocomplete(event=autocompletes.pjsk_event_alias)
     @app_commands.describe(event="Event name or ID.", alias="Alias to remove.")
     async def event_remove(
         self, interaction: discord.Interaction, event: str, alias: str

@@ -600,11 +600,11 @@ class GuessCog(commands.Cog):
             await self._award(message, data)
         elif self.bot.pjsk.is_music_leaked(music.id) and not data.get("allow_leaks"):
             # a leak is never the answer and we don't reveal its title where leaks are off, so
-            # treat it like nothing matched, with the mikuleak emoji as a quiet tell that we
+            # treat it like nothing matched, with the mikuleek emoji as a quiet tell that we
             # actually did match a leak
             await message.reply(
                 embed=embeds.error_embed(
-                    f"{emojis.mikuleak} Couldn't find a song matching `{content}`."
+                    f"{emojis.mikuleek} Couldn't find a song matching `{content}`."
                     + tip,
                     title="Incorrect",
                 )

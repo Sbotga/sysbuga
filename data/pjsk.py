@@ -258,6 +258,16 @@ class PJSKData:
     def get_event(self, event_id: int) -> Event | None:
         return self._merged_events().get(event_id)
 
+    def released_events(self) -> list[Event]:
+        """merged events already started in-game, leaks (start_at in the future) excluded"""
+        now = int(time.time() * 1000)
+        return [e for e in self.events() if (e.start_at or 0) <= now]
+
+    def is_event_leaked(self, event_id: int) -> bool:
+        """true if the event exists in our data but hasn't started in-game yet"""
+        event = self.get_event(event_id)
+        return bool(event and (event.start_at or 0) > int(time.time() * 1000))
+
     def characters(self) -> list[Character]:
         return self._characters
 

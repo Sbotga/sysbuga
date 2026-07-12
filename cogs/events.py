@@ -9,7 +9,7 @@ from discord.ext import commands
 
 from data.models import Event
 from data.search import preprocess
-from helpers import converters, embeds, tools
+from helpers import converters, embeds, leaks, tools
 from helpers.autocompletes import autocompletes
 from helpers.emojis import emojis
 from helpers.views import Paginator
@@ -42,6 +42,16 @@ EVENT_TYPE_NAMES = {
 class EventsCog(commands.Cog):
     def __init__(self, bot: SbugaBot) -> None:
         self.bot = bot
+
+    async def _leak_status(
+        self, interaction: discord.Interaction, event_id: int
+    ) -> str:
+        """'ok' if the event has started, else 'spoiler' when this server allows leaks or
+        'block' when it doesn't - the shared leak gate for public event commands"""
+        if not self.bot.pjsk.is_event_leaked(event_id):  # type: ignore[union-attr]
+            return "ok"
+        allow = interaction.guild and await self.bot.user_data.allow_leaks(interaction.guild_id)  # type: ignore[union-attr,arg-type]
+        return "spoiler" if allow else "block"
 
     async def _resolve_region(
         self, interaction: discord.Interaction, region: str
@@ -139,7 +149,14 @@ class EventsCog(commands.Cog):
                 embed=embeds.error_embed("Couldn't find that event.")
             )
             return
-        await interaction.followup.send(embed=self._event_embed(event_obj))
+        status = await self._leak_status(interaction, event_obj.id)
+        if status == "block":
+            await interaction.followup.send(embed=embeds.leak_embed())
+            return
+        embed = self._event_embed(event_obj)
+        if status == "spoiler":  # server allows leaks, so flag it but still show it
+            embed.description = leaks.leak_notice() + "\n" + (embed.description or "")
+        await interaction.followup.send(embed=embed)
 
     @event.command(name="aliases", description="View an event's aliases.")
     @app_commands.autocomplete(event=autocompletes.pjsk_event)
@@ -152,18 +169,25 @@ class EventsCog(commands.Cog):
                 embed=embeds.error_embed(f"Couldn't find an event matching `{event}`.")
             )
             return
+        status = await self._leak_status(interaction, ev.id)
+        if status == "block":
+            await interaction.followup.send(embed=embeds.leak_embed())
+            return
+        leaked = status == "spoiler"
         manual = sorted(self.bot.pjsk.event_aliases(ev.id))  # type: ignore[union-attr]
         # the keys the matcher accepts, minus the manual aliases, the name, and the bare id
         skip = {preprocess(a) for a in manual} | {preprocess(ev.name), str(ev.id)}
         auto = [k for k in self.bot.pjsk.event_keys(ev.id) if k not in skip]  # type: ignore[union-attr]
-        embed = embeds.embed(
-            title="Aliases",
-            description=f"Aliases for `{ev.name}` (ID `{ev.id}`)",
-        )
-        embed.add_field(name="Manually Added", value=_alias_field(manual), inline=False)
-        embed.add_field(
-            name="Automatically Generated", value=_alias_field(auto), inline=False
-        )
+        header = f"Aliases for `{ev.name}` (ID `{ev.id}`)"
+        manual_field = _alias_field(manual)
+        auto_field = _alias_field(auto)
+        if leaked:  # allowed here, so spoiler everything and flag it
+            header = leaks.leak_notice() + "\n" + leaks.spoiler_text(header)
+            manual_field = leaks.spoiler_text(manual_field)
+            auto_field = leaks.spoiler_text(auto_field)
+        embed = embeds.embed(title="Aliases", description=header)
+        embed.add_field(name="Manually Added", value=manual_field, inline=False)
+        embed.add_field(name="Automatically Generated", value=auto_field, inline=False)
         await interaction.followup.send(embed=embed)
 
     @event.command(name="leaderboard", description="View the current event's top 100.")

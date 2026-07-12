@@ -109,13 +109,21 @@ class Autocompletes:
             if current_lower in key.lower() or current_lower in value.lower()
         ][:25]
 
-    async def pjsk_song(
-        self, interaction: discord.Interaction, current: str
+    async def _alias_authed(self, interaction: discord.Interaction) -> bool:
+        # the manager check lives on the info cog; treat a missing cog as unauthorized
+        cog = interaction.client.get_cog("InfoCog")  # type: ignore[attr-defined]
+        return bool(cog and await cog._is_alias_mod(interaction.user.id))
+
+    def _list_songs(
+        self, current: str, *, include_leaks: bool
     ) -> list[app_commands.Choice[str]]:
         if not self.pjsk:
             return []
         if not current.strip():
-            musics = self.pjsk.musics()[:25]
+            source = (
+                self.pjsk.musics() if include_leaks else self.pjsk.released_musics()
+            )
+            musics = source[:25]
         else:
             ids = self.pjsk.search_songs(current, limit=25)
             # the command matches on best_song_id; surface that pick first so what you'd
@@ -124,26 +132,60 @@ class Autocompletes:
             if best is not None:
                 ids = [best] + [i for i in ids if i != best]
             musics = [m for m in (self.pjsk.get_music(i) for i in ids) if m]
+            if not include_leaks:
+                musics = [m for m in musics if not self.pjsk.is_music_leaked(m.id)]
         return [
             app_commands.Choice(name=m.title[:100], value=str(m.id)) for m in musics
         ][:25]
 
-    async def pjsk_event(
+    async def pjsk_song(
         self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        # public: leaks are hidden here
+        return self._list_songs(current, include_leaks=False)
+
+    async def pjsk_song_alias(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        # alias managers only, and they can see leaks (aliases can be managed on leaked songs)
+        if not await self._alias_authed(interaction):
+            return [app_commands.Choice(name="⚠️ Not Authorized", value="0")]
+        return self._list_songs(current, include_leaks=True)
+
+    async def pjsk_event_alias(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        if not await self._alias_authed(interaction):
+            return [app_commands.Choice(name="⚠️ Not Authorized", value="0")]
+        return self._list_events(current, include_leaks=True)
+
+    def _list_events(
+        self, current: str, *, include_leaks: bool
     ) -> list[app_commands.Choice[str]]:
         if not self.pjsk:
             return []
         if not current.strip():
-            events = self.pjsk.events()[:25]
+            source = (
+                self.pjsk.events() if include_leaks else self.pjsk.released_events()
+            )
+            events = source[:25]
         else:
             ids = self.pjsk.search_events(current, limit=25)
             best = self.pjsk.best_event_id(current)
             if best is not None:
                 ids = [best] + [i for i in ids if i != best]
             events = [e for e in (self.pjsk.get_event(i) for i in ids) if e]
+            if not include_leaks:
+                events = [e for e in events if not self.pjsk.is_event_leaked(e.id)]
         return [
             app_commands.Choice(name=e.name[:100], value=str(e.id)) for e in events
         ][:25]
+
+    async def pjsk_event(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        # public: leaks are hidden here
+        return self._list_events(current, include_leaks=False)
 
     async def pjsk_character(
         self, interaction: discord.Interaction, current: str

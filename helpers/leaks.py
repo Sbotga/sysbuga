@@ -2,7 +2,7 @@
 
 when a server allows leaks we don't block leaked content, we show it spoilered: every text
 line wrapped in spoiler bars, file attachments flagged as spoilers (SPOILER_ prefix), and a
-mikuleak notice on top
+mikuleek notice on top
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from helpers.emojis import emojis
 
 
 def leak_notice() -> str:
-    return f"{emojis.mikuleak} **This is a leak!**"
+    return f"{emojis.mikuleek} **This is a leak!**"
 
 
 def spoiler_text(text: str) -> str:

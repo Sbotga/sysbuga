@@ -50,8 +50,15 @@ def warn_embed(
 
 
 def leak_embed(description: str | None = None) -> SbugaEmbed:
+    # the mikuleek emoji is custom, so it goes in the description - discord won't render a
+    # custom emoji in an embed title
+    from helpers.emojis import emojis
+
     return embed(
-        title="🥬 Is that a leak?",
-        description=description or "That's not out yet - have a leek instead!",
+        title="Is that a leak?",
+        description=(
+            description
+            or f"{emojis.mikuleek} That's not out yet - have a leek instead!"
+        ),
         color=discord.Color.dark_green(),
     )
