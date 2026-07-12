@@ -21,8 +21,11 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS guilds (
     id SERIAL PRIMARY KEY,
     guild_id BIGINT UNIQUE NOT NULL,
-    guessing_enabled BOOLEAN DEFAULT true
+    guessing_enabled BOOLEAN DEFAULT true,
+    allow_leaks BOOLEAN DEFAULT false
 );
+
+ALTER TABLE guilds ADD COLUMN IF NOT EXISTS allow_leaks BOOLEAN DEFAULT false;
 
 CREATE TABLE IF NOT EXISTS oauth_tokens (
     discord_id BIGINT PRIMARY KEY,

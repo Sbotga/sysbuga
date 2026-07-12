@@ -566,7 +566,9 @@ async function useHint() {
         audio.src = `${API}/api/activity/guess/round/${currentRound.round_id}/image?s=${res.stage}`;
         audio.hidden = false;
         audio.play().catch(() => {});
-        playerLog("💡", `Stage ${res.stage}/${res.max_stage} - ${res.seconds}s of the song`, "hint");
+        let text = `Stage ${res.stage}/${res.max_stage} - ${res.seconds}s of the song`;
+        if (res.cover_type) text += `\nCover type: ${res.cover_type}`;
+        playerLog("💡", text, "hint");
         if (currentRound) currentRound.stage = res.stage;
         refreshGiveup();
       }

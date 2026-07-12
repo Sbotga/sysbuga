@@ -27,6 +27,7 @@ from cogs.guessing import (
     HINT_COOLDOWN,
     MAX_TEXT_HINTS,
     MODE_TIME,
+    MUSIC_GUESS_EXCLUDED,
     SONG_REVEAL_FRACTION,
     _fetch_bytes,
     _giveup_seconds,
@@ -149,12 +150,15 @@ async def _build_round(
     }
 
     if mode == "music":
-        all_musics = pjsk.released_musics()
+        all_musics = [
+            m for m in pjsk.released_musics() if m.id not in MUSIC_GUESS_EXCLUDED
+        ]
         for _ in range(5):
             music = random.choice(all_musics)
-            url = song_clip.pick_nosil_url(music)
-            if not url:
+            picked = song_clip.pick_nosil(music)
+            if not picked:
                 continue
+            url, cover_type = picked
             audio = await _safe_fetch(url)
             if not audio:
                 continue
@@ -175,6 +179,7 @@ async def _build_round(
             round_data["audio"] = audio  # only to pre-cut the stages not persisted
             round_data["start"] = start
             round_data["stage"] = 1
+            round_data["cover_type"] = cover_type  # revealed on the final hint
             round_data["prompt"] = (
                 f"Guess the song from a {int(song_clip.STAGE_SECONDS[1])} second clip. "
                 "Use a hint to hear more."
@@ -389,6 +394,7 @@ def _meta(
         meta["start"] = round_data["start"]
         meta["audio_url"] = round_data["audio_url"]  # re-fetched for the reveal
         meta["has_full"] = bool(round_data.get("audio_url"))
+        meta["cover_type"] = round_data.get("cover_type")  # revealed on the final hint
     else:  # everything else uses cumulative tiered text hints
         meta["hint"] = round_data.get("hint") or {}
         meta["hint_stage"] = 0
@@ -645,12 +651,15 @@ async def _music_hint(
     await redis_state.update_round(round_id, meta)
     if user_data:
         await user_data.add_guesses(user_id, meta["mode"], "hint")
-    return {
+    resp = {
         "stage": stage,
         "max_stage": song_clip.MAX_STAGE,
         "seconds": int(song_clip.STAGE_SECONDS[stage]),
         "done": stage >= song_clip.MAX_STAGE,
     }
+    if stage >= song_clip.MAX_STAGE and meta.get("cover_type"):
+        resp["cover_type"] = meta["cover_type"]  # final hint reveals the cover type
+    return resp
 
 
 @router.post("/guess/reveal")
@@ -718,6 +727,10 @@ async def submit_guess(
 
     matched = _match(_pjsk(state), meta, body.guess)
     if matched is None:
+        return {"result": "not_found"}
+    # the activity can never enable leaks (no guild setting, and dms have none), so a guess that
+    # resolves to a leak is never surfaced - treat it as not found
+    if meta["type"] == "song" and _pjsk(state).is_music_leaked(matched[0]):
         return {"result": "not_found"}
     correct = (
         songs_equivalent(matched[0], meta["answer_id"])

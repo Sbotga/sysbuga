@@ -41,12 +41,15 @@ GUESS_TIP = "\n-# Use `-hint` for a hint, `-end` to give up, or `-time` for time
 # music mode variant where a hint reveals more of the song rather than a fact
 MUSIC_TIP = "\n-# Use `-hint` to provide more of the song, or `-time` for time left!"
 # a hint can't fire within this many seconds of the previous one
-HINT_COOLDOWN = 5.0
+HINT_COOLDOWN = 2.0
 # non-music modes get three cumulative text hints and the last reveals this fraction of the
 # name's characters at random
 MAX_TEXT_HINTS = 3
-SONG_REVEAL_FRACTION = 1 / 5
-EVENT_REVEAL_FRACTION = 1 / 5
+SONG_REVEAL_FRACTION = 1 / 7
+EVENT_REVEAL_FRACTION = 1 / 7
+
+# songs that don't work as a /guess music round; still fine for chart and jacket guessing
+MUSIC_GUESS_EXCLUDED = {674, 675, 676}
 
 
 def _masked_name(name: str, fraction: float) -> str:
@@ -55,7 +58,7 @@ def _masked_name(name: str, fraction: float) -> str:
     positions = [i for i, ch in enumerate(name) if not ch.isspace()]
     if not positions:
         return name
-    count = max(1, round(len(positions) * fraction))
+    count = max(1, int(len(positions) * fraction))  # floored, but always at least one
     revealed = set(random.sample(positions, min(count, len(positions))))
     return "".join(
         ch if (ch.isspace() or i in revealed) else "_" for i, ch in enumerate(name)
@@ -272,7 +275,7 @@ class GuessCog(commands.Cog):
         return None
 
     async def _pick_music(self):
-        """returns music, full song audio, nosil url, window start seconds, jacket or none
+        """returns music, full song audio, nosil url, window start, jacket, cover type or none
         rerolls past songs with no nosil audio or too short to place a window and returns none
         if nothing is usable
         the audio is only used to cut the small stage clips and isn't kept on the round
@@ -281,9 +284,12 @@ class GuessCog(commands.Cog):
             music = self._random_song()
             if not music:
                 return None
-            url = song_clip.pick_nosil_url(music)
-            if not url:
+            if music.id in MUSIC_GUESS_EXCLUDED:
                 continue
+            picked = song_clip.pick_nosil(music)
+            if not picked:
+                continue
+            url, cover_type = picked
             audio = await _fetch_bytes(url)
             if not audio:
                 continue
@@ -291,7 +297,7 @@ class GuessCog(commands.Cog):
             if start is None:
                 continue  # too short to place a window
             jacket = await _fetch_bytes(music.jacket_url) if music.jacket_url else None
-            return music, audio, url, start, jacket
+            return music, audio, url, start, jacket, cover_type
         return None
 
     async def _gen_music_clips(self, data: dict, audio: bytes, start: float) -> None:
@@ -592,6 +598,17 @@ class GuessCog(commands.Cog):
         music, key = hit
         if songs_equivalent(music.id, data["answer"]):
             await self._award(message, data)
+        elif self.bot.pjsk.is_music_leaked(music.id) and not data.get("allow_leaks"):
+            # a leak is never the answer and we don't reveal its title where leaks are off, so
+            # treat it like nothing matched, with the mikuleak emoji as a quiet tell that we
+            # actually did match a leak
+            await message.reply(
+                embed=embeds.error_embed(
+                    f"{emojis.mikuleak} Couldn't find a song matching `{content}`."
+                    + tip,
+                    title="Incorrect",
+                )
+            )
         else:
             await message.reply(
                 embed=embeds.error_embed(
@@ -664,9 +681,16 @@ class GuessCog(commands.Cog):
         if not await self.channel_checks(interaction):
             return
 
+        # cached once per round so guess checking doesn't hit the db each guess; when off, a
+        # guess that resolves to a leak is hidden so we never reveal an unreleased title
+        allow_leaks = bool(
+            interaction.guild
+            and await self.bot.user_data.allow_leaks(interaction.guild_id)  # type: ignore[union-attr,arg-type]
+        )
         guess: dict[str, Any] = {
             "guessers": set(),  # user ids who've made a guess and are needed to give up
             "host": interaction.user.id,  # the starter can give up without guessing
+            "allow_leaks": allow_leaks,
             "channel": interaction.channel,
             "id": tools.generate_secure_string(25),
             "guessType": None,
@@ -744,7 +768,7 @@ class GuessCog(commands.Cog):
             hit = await self._pick_music()
             if not hit:
                 return None, None
-            music, audio, url, start, jacket = hit
+            music, audio, url, start, jacket, cover_type = hit
             guess["answer"] = music.id
             guess["answerName"] = music.title
             if jacket:
@@ -754,6 +778,7 @@ class GuessCog(commands.Cog):
             data["start"] = start
             data["stage"] = 1
             data["last_hint"] = 0.0
+            data["cover_type"] = cover_type  # revealed on the final hint
             clip1 = await song_clip.stage_clip(audio, start, 1)
             data["clips"] = {1: clip1}
             # cut the longer stages in the background while they listen to stage 1
@@ -1191,11 +1216,12 @@ class GuessCog(commands.Cog):
         clip = await self._music_clip(d, stage)
         if clip is None:
             return embeds.error_embed("Couldn't extend the clip."), [], False
+        desc = f"Here's {int(song_clip.STAGE_SECONDS[stage])} seconds of the song."
+        if stage >= song_clip.MAX_STAGE and d.get("cover_type"):
+            desc += f"\nCover type: **{d['cover_type']}**"
         embed = embeds.embed(
             title=f"Guess Hint - Stage {stage}/{song_clip.MAX_STAGE}",
-            description=(
-                f"Here's {int(song_clip.STAGE_SECONDS[stage])} seconds of the song."
-            ),
+            description=desc,
             color=discord.Color.red(),
         )
         return (
@@ -1329,27 +1355,8 @@ class GuessCog(commands.Cog):
         if counted and data["guessing"]:
             await self.bot.user_data.add_guesses(message.author.id, data["guessing"], "hint")  # type: ignore[union-attr]
 
-    @guess.command(
-        name="toggle", description="Enable or disable guessing in this server."
-    )
-    @app_commands.guild_only()
-    @app_commands.describe(on="Whether guessing should be enabled.")
-    async def toggle(self, interaction: discord.Interaction, on: bool) -> None:
-        await interaction.response.defer()
-        if (
-            not isinstance(interaction.user, discord.Member)
-            or not interaction.user.guild_permissions.manage_guild
-        ):
-            await interaction.followup.send(
-                embed=embeds.error_embed("You need the `Manage Server` permission.")
-            )
-            return
-        state = await self.bot.user_data.toggle_guessing(interaction.guild_id, on)  # type: ignore[union-attr,arg-type]
-        await interaction.followup.send(
-            embed=embeds.success_embed(
-                f"Guessing is now **{'ON' if state else 'OFF'}**!"
-            )
-        )
+    # guessing_enabled still applies (see channel_checks) but is immutable for now, so no
+    # toggle command is exposed
 
     @guess.command(name="stats", description="View your guessing statistics.")
     @app_commands.describe(user="Whose stats to view.")

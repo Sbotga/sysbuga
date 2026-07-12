@@ -333,6 +333,14 @@ class PJSKData:
         """Manually-added aliases from cache (refreshed every 120s and on each edit)."""
         return list(self._song_aliases.get(music_id, ()))
 
+    def event_keys(self, event_id: int) -> list[str]:
+        """every key the matcher accepts for this event (name, aliases, romanizations)"""
+        return search.event_keys(event_id)
+
+    def event_aliases(self, event_id: int) -> list[str]:
+        """manually-added event aliases from cache (refreshed every 120s and on each edit)"""
+        return list(self._event_aliases.get(event_id, ()))
+
     def best_event_id(self, query: str) -> int | None:
         return search.best_event_match(query)
 
@@ -564,6 +572,34 @@ class PJSKData:
             if not values:
                 del self._song_aliases[music_id]
         await self._reindex_one_song(music_id)
+
+    async def _reindex_one_event(self, event_id: int) -> None:
+        """re-index a single event in the live maps after its alias list changed, then persist"""
+        async with self._lock:
+            self._apply_event_aliases()
+            copies = [e for e in self._all_region_events() if e.id == event_id]
+            if copies:
+                search.reindex_event(copies)
+        await search.save_maps()
+        await self._to_thread(self._save_aliases)
+
+    async def add_event_alias_local(self, event_id: int, alias: str) -> None:
+        """record an alias just added through the api and re-index that event at once so it's
+        searchable immediately. alias is preprocessed"""
+        values = self._event_aliases.setdefault(event_id, [])
+        if alias not in values:
+            values.append(alias)
+            values.sort()
+        await self._reindex_one_event(event_id)
+
+    async def remove_event_alias_local(self, event_id: int, alias: str) -> None:
+        """drop an alias just removed through the api and re-index that event at once"""
+        values = self._event_aliases.get(event_id)
+        if values and alias in values:
+            values.remove(alias)
+            if not values:
+                del self._event_aliases[event_id]
+        await self._reindex_one_event(event_id)
 
     async def _refresh_extras(self) -> None:
         chars: dict[int, Character] = {}

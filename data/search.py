@@ -787,6 +787,12 @@ def song_keys(music_id: int) -> list[str]:
     return sorted(k for k, ids in _playlist_map.items() if music_id in ids)
 
 
+def event_keys(event_id: int) -> list[str]:
+    """every key the event matcher accepts for this event — name, aliases, and generated
+    romanizations, already preprocessed"""
+    return sorted(k for k, ids in _event_map.items() if event_id in ids)
+
+
 def best_song_match_key(
     query: str, sensitivity: float = DEFAULT_SENSITIVITY
 ) -> tuple[int, str] | None:

@@ -12,7 +12,7 @@ from discord.ext import commands
 
 from data.models import Music
 from data.search import preprocess
-from helpers import converters, embeds, tools
+from helpers import converters, embeds, leaks, tools
 from helpers.autocompletes import autocompletes
 from helpers.emojis import emojis
 from helpers.views import LinkButtonView, SbugaView
@@ -379,7 +379,11 @@ class SongInfo(commands.Cog):
         music = await self._resolve_song(interaction, song)
         if not music:
             return
-        if self.bot.pjsk.is_music_leaked(music.id):  # type: ignore[union-attr]
+        leaked = self.bot.pjsk.is_music_leaked(music.id)  # type: ignore[union-attr]
+        if leaked and not (
+            interaction.guild
+            and await self.bot.user_data.allow_leaks(interaction.guild_id)  # type: ignore[union-attr,arg-type]
+        ):
             await interaction.followup.send(embed=embeds.leak_embed())
             return
 
@@ -419,11 +423,25 @@ class SongInfo(commands.Cog):
         lines.append("")
         lines.extend(diff_lines)
 
-        embed = embeds.embed(
-            title=music.title, description="\n".join(filter(None, lines)).strip()
-        )
-        embed.set_thumbnail(url=music.jacket_url)
-        await interaction.followup.send(embed=embed)
+        body = "\n".join(filter(None, lines)).strip()
+        files: list[discord.File] = []
+        if leaked:  # allowed here, so show it spoilered rather than blocking
+            body = f"**{music.title}**\n{body}"
+            embed = embeds.embed(
+                description=leaks.leak_notice() + "\n" + leaks.spoiler_text(body)
+            )
+            try:
+                async with aiohttp.ClientSession() as cs:
+                    async with cs.get(music.jacket_url) as resp:
+                        jacket = await resp.read() if resp.status == 200 else None
+            except Exception:
+                jacket = None
+            if jacket:
+                files.append(discord.File(BytesIO(jacket), "jacket.png", spoiler=True))
+        else:
+            embed = embeds.embed(title=music.title, description=body)
+            embed.set_thumbnail(url=music.jacket_url)
+        await interaction.followup.send(embed=embed, files=files)
 
     @song.command(name="aliases", description="View a song's aliases.")
     @app_commands.autocomplete(song=autocompletes.pjsk_song)

@@ -1,8 +1,8 @@
-"""Cut short audio snippets out of a song for the 'guess the music' mode.
+"""cut short audio snippets out of a song for the guess the music mode
 
-A round fixes one window start; each hint reveals a longer clip from it - 1s, then 3s, 5s,
-and finally the whole 7s. Cutting a NOSIL (silence-trimmed) vocal so the window lands on
-actual audio. The full track is kept for the reveal.
+a round fixes one window start and each hint reveals a longer clip from it, 1s then 3s then 5s,
+and the last hint keeps the 5s clip but reveals the cover type. cutting a nosil (silence-trimmed)
+vocal so the window lands on actual audio. the full track is kept for the reveal.
 """
 
 from __future__ import annotations
@@ -17,20 +17,46 @@ _TMP_BASE = Path(tempfile.gettempdir()) / "sbuga_song_clips"
 
 CLIP_START_MIN = 5.0  # cut at least this far from the song's start
 CLIP_END_MARGIN = 20.0  # ...and the cut point at least this far from its end
-FULL_SECONDS = 7.0  # the longest (final) reveal clip
-# stage -> seconds of the window revealed; stage 4 is the whole window
-STAGE_SECONDS = {1: 1.0, 2: 3.0, 3: 5.0, 4: FULL_SECONDS}
+FULL_SECONDS = 5.0  # the longest clip length (the final hint reveals the cover type, not more audio)
+# stage -> seconds of the window revealed; stage 4 keeps stage 3's length and adds the cover type
+STAGE_SECONDS = {1: 1.0, 2: 3.0, 3: 5.0, 4: 5.0}
 MAX_STAGE = 4
+
+# japanese vocal captions normalized to english (see sbuga-sonolus-server music api)
+CAPTION_JP_TO_EN: dict[str, str] = {
+    "バーチャル・シンガーver.": "VIRTUAL SINGER ver.",
+    "セカイver.": "SEKAI ver.",
+    "ワンダーランズ×ショウタイム ver.": "Wonderlands×Showtime ver.",
+    "25時、ナイトコードで。ver.": "Nightcord at 25:00 ver.",
+    "アナザーボーカルver.": "Cover ver.",
+    "Inst.ver.": "Instrumental ver.",
+    "エイプリルフールver.": "April Fool's ver.",
+    "コネクトライブver.": "Connect Live ver.",
+    "コネクトライブ(DAY1夜)ver.": "Connect Live (DAY1 Night) ver.",
+    "コネクトライブ(DAY1昼)ver.": "Connect Live (DAY1 Day) ver.",
+    "コネクトライブ(DAY2夜)ver.": "Connect Live (DAY2 Night) ver.",
+    "コネクトライブ(DAY2昼)ver.": "Connect Live (DAY2 Day) ver.",
+    "あんさんぶるスターズ！！コラボver.": "Ensemble Stars!! Crossover ver.",
+    "「劇場版プロジェクトセカイ」ver.": "COLORFUL STAGE! The Movie ver.",
+}
+
+
+def normalize_caption(caption: str) -> str:
+    return CAPTION_JP_TO_EN.get(caption, caption)
 
 
 class SongClipError(RuntimeError):
     pass
 
 
-def pick_nosil_url(music: Any) -> str | None:
-    """A random vocal's silence-trimmed audio - no vocal-type priority."""
-    urls = [v.bgm_nosil_url for v in music.vocals if v.bgm_nosil_url]
-    return random.choice(urls) if urls else None
+def pick_nosil(music: Any) -> "tuple[str, str] | None":
+    """a random vocal's silence-trimmed audio url and its cover type caption in english, or
+    none if the song has no nosil vocal"""
+    vocals = [v for v in music.vocals if v.bgm_nosil_url]
+    if not vocals:
+        return None
+    vocal = random.choice(vocals)
+    return vocal.bgm_nosil_url, normalize_caption(vocal.caption)
 
 
 def clip_filename(stage: int) -> str:
@@ -75,8 +101,10 @@ async def choose_window(audio: bytes) -> float | None:
 
 
 async def stage_clip(audio: bytes, start: float, stage: int) -> bytes:
-    """The first STAGE_SECONDS[stage] seconds of the window that begins at `start`."""
-    seconds = STAGE_SECONDS.get(stage, FULL_SECONDS)
+    """the first STAGE_SECONDS[stage] seconds of the window that begins at start"""
+    # cut a touch short of the advertised length so discord's rounded-up duration display
+    # matches (a 1.0s mp3 shows as 2s otherwise)
+    seconds = max(0.1, STAGE_SECONDS.get(stage, FULL_SECONDS) - 0.1)
     _TMP_BASE.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="stage_", dir=_TMP_BASE) as tmp:
         src = Path(tmp) / "full.mp3"

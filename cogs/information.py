@@ -51,19 +51,44 @@ class InfoCog(commands.Cog):
                 return False
         return bool(role_ids & {r.id for r in member.roles})
 
-    def _alias_error_embed(self, error: SbugaError, alias: str) -> discord.Embed:
-        """Aliases are unique across every song, so name the one already holding it."""
-        if error.detail == "alias_taken":
-            music_id = error.data.get("music_id")
-            other = self.bot.pjsk.get_music(music_id) if music_id else None  # type: ignore[union-attr]
-            where = (
-                f"**{other.title}** (ID `{other.id}`)"
-                if other
-                else f"song ID `{music_id}`"
-            )
+    async def _alias_error_embed(
+        self, error: SbugaError, alias: str, *, kind: str = "song"
+    ) -> discord.Embed:
+        """aliases are unique across every song (or event), so name the one already holding it.
+        the backend may not return structured info on a conflict (it can surface a plain 500),
+        so fall back to looking the holder up ourselves instead of echoing a raw error
+        """
+        holder_id = error.data.get("music_id") or error.data.get("event_id")
+        if holder_id is None and error.status in (409, 500):
+            try:
+                if kind == "song":
+                    aliases = await self.bot.sbuga.get_song_aliases()  # type: ignore[union-attr]
+                    hit = next((a for a in aliases if a.alias == alias), None)
+                    holder_id = hit.music_id if hit else None
+                else:
+                    aliases = await self.bot.sbuga.get_event_aliases()  # type: ignore[union-attr]
+                    hit = next((a for a in aliases if a.alias == alias), None)
+                    holder_id = hit.event_id if hit else None
+            except SbugaError:
+                holder_id = None
+        if holder_id is not None:
+            if kind == "song":
+                other = self.bot.pjsk.get_music(holder_id)  # type: ignore[union-attr]
+                where = (
+                    f"**{other.title}** (ID `{other.id}`)"
+                    if other
+                    else f"song ID `{holder_id}`"
+                )
+            else:
+                other = self.bot.pjsk.get_event(holder_id)  # type: ignore[union-attr]
+                where = (
+                    f"**{other.name}** (ID `{other.id}`)"
+                    if other
+                    else f"event ID `{holder_id}`"
+                )
             return embeds.error_embed(
                 f"`{alias}` is already an alias for {where}.\n"
-                "Remove it from that song before adding it here.",
+                "Remove it from there before adding it here.",
                 title="Alias already taken",
             )
         return embeds.error_embed(f"Couldn't add alias: {error.detail or error.status}")
@@ -323,17 +348,25 @@ class InfoCog(commands.Cog):
     # elsewhere. Not user-installable and not usable in DMs.
     alias = app_commands.Group(
         name="alias",
-        description="Song aliases (alias managers only).",
+        description="Manage song and event aliases (alias managers only).",
         allowed_installs=app_commands.AppInstallationType(guild=True, user=True),
         allowed_contexts=app_commands.AppCommandContext(
             guild=True, dm_channel=True, private_channel=True
         ),
     )
+    alias_music = app_commands.Group(
+        name="music", description="Song aliases.", parent=alias
+    )
+    alias_event = app_commands.Group(
+        name="event", description="Event aliases.", parent=alias
+    )
 
-    @alias.command(name="list", description="Authorized only; view a song's aliases.")
+    @alias_music.command(
+        name="list", description="Authorized only; view a song's aliases."
+    )
     @app_commands.autocomplete(song=autocompletes.pjsk_song)
     @app_commands.describe(song="Song name or ID.")
-    async def list_aliases(self, interaction: discord.Interaction, song: str) -> None:
+    async def music_list(self, interaction: discord.Interaction, song: str) -> None:
         if await self._deny_alias(interaction):
             return
         await interaction.response.defer(thinking=True)
@@ -354,10 +387,10 @@ class InfoCog(commands.Cog):
         embed.set_footer(text=f"Song ID {music.id} - {len(names)} aliases")
         await interaction.followup.send(embed=embed)
 
-    @alias.command(name="add", description="Authorized only; add a song alias.")
+    @alias_music.command(name="add", description="Authorized only; add a song alias.")
     @app_commands.autocomplete(song=autocompletes.pjsk_song)
     @app_commands.describe(song="Song name or ID.", alias="Alias to add.")
-    async def add_alias(
+    async def music_add(
         self, interaction: discord.Interaction, song: str, alias: str
     ) -> None:
         if await self._deny_alias(interaction):
@@ -378,7 +411,9 @@ class InfoCog(commands.Cog):
         try:
             await self.bot.sbuga.add_song_alias(music.id, target)  # type: ignore[union-attr]
         except SbugaError as e:
-            await interaction.followup.send(embed=self._alias_error_embed(e, target))
+            await interaction.followup.send(
+                embed=await self._alias_error_embed(e, target, kind="song")
+            )
             return
         await self.bot.pjsk.add_song_alias_local(music.id, target)  # type: ignore[union-attr]
         await interaction.followup.send(
@@ -388,10 +423,12 @@ class InfoCog(commands.Cog):
             )
         )
 
-    @alias.command(name="remove", description="Authorized only; remove a song alias.")
+    @alias_music.command(
+        name="remove", description="Authorized only; remove a song alias."
+    )
     @app_commands.autocomplete(song=autocompletes.pjsk_song)
     @app_commands.describe(song="Song name or ID.", alias="Alias to remove.")
-    async def remove_alias(
+    async def music_remove(
         self, interaction: discord.Interaction, song: str, alias: str
     ) -> None:
         if await self._deny_alias(interaction):
@@ -428,6 +465,113 @@ class InfoCog(commands.Cog):
         await interaction.followup.send(
             embed=embeds.success_embed(
                 f"Removed alias for `{music.title}` (ID `{music.id}`)\nAlias: `{target}`",
+                title="Removed alias!",
+            )
+        )
+
+    @alias_event.command(
+        name="list", description="Authorized only; view an event's aliases."
+    )
+    @app_commands.autocomplete(event=autocompletes.pjsk_event)
+    @app_commands.describe(event="Event name or ID.")
+    async def event_list(self, interaction: discord.Interaction, event: str) -> None:
+        if await self._deny_alias(interaction):
+            return
+        await interaction.response.defer(thinking=True)
+        ev = converters.match_event(self.bot.pjsk, event)  # type: ignore[arg-type]
+        if not ev:
+            await interaction.followup.send(
+                embed=embeds.error_embed(f"Couldn't find an event matching `{event}`.")
+            )
+            return
+        names = sorted(self.bot.pjsk.event_aliases(ev.id))  # type: ignore[union-attr]
+        embed = embeds.embed(
+            title=f"Aliases - {ev.name}",
+            description=(
+                "\n".join(f"- `{n}`" for n in names) if names else "No aliases yet."
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text=f"Event ID {ev.id} - {len(names)} aliases")
+        await interaction.followup.send(embed=embed)
+
+    @alias_event.command(name="add", description="Authorized only; add an event alias.")
+    @app_commands.autocomplete(event=autocompletes.pjsk_event)
+    @app_commands.describe(event="Event name or ID.", alias="Alias to add.")
+    async def event_add(
+        self, interaction: discord.Interaction, event: str, alias: str
+    ) -> None:
+        if await self._deny_alias(interaction):
+            return
+        await interaction.response.defer(thinking=True)
+        ev = converters.match_event(self.bot.pjsk, event)  # type: ignore[arg-type]
+        if not ev:
+            await interaction.followup.send(
+                embed=embeds.error_embed(f"Couldn't find an event matching `{event}`.")
+            )
+            return
+        target = preprocess(alias)
+        if not target:
+            await interaction.followup.send(
+                embed=embeds.error_embed("That alias is empty after normalisation.")
+            )
+            return
+        try:
+            await self.bot.sbuga.add_event_alias(ev.id, target)  # type: ignore[union-attr]
+        except SbugaError as e:
+            await interaction.followup.send(
+                embed=await self._alias_error_embed(e, target, kind="event")
+            )
+            return
+        await self.bot.pjsk.add_event_alias_local(ev.id, target)  # type: ignore[union-attr]
+        await interaction.followup.send(
+            embed=embeds.success_embed(
+                f"Added alias for `{ev.name}` (ID `{ev.id}`)\nAlias: `{target}`",
+                title="Added alias!",
+            )
+        )
+
+    @alias_event.command(
+        name="remove", description="Authorized only; remove an event alias."
+    )
+    @app_commands.autocomplete(event=autocompletes.pjsk_event)
+    @app_commands.describe(event="Event name or ID.", alias="Alias to remove.")
+    async def event_remove(
+        self, interaction: discord.Interaction, event: str, alias: str
+    ) -> None:
+        if await self._deny_alias(interaction):
+            return
+        await interaction.response.defer(thinking=True)
+        ev = converters.match_event(self.bot.pjsk, event)  # type: ignore[arg-type]
+        if not ev:
+            await interaction.followup.send(
+                embed=embeds.error_embed(f"Couldn't find an event matching `{event}`.")
+            )
+            return
+        target = preprocess(alias)
+        try:
+            existing = await self.bot.sbuga.get_event_aliases()  # type: ignore[union-attr]
+            match = next(
+                (a for a in existing if a.event_id == ev.id and a.alias == target),
+                None,
+            )
+            if not match:
+                await interaction.followup.send(
+                    embed=embeds.error_embed(f"No alias `{target}` on `{ev.name}`.")
+                )
+                return
+            await self.bot.sbuga.remove_event_alias(match.id)  # type: ignore[union-attr]
+        except SbugaError as e:
+            await interaction.followup.send(
+                embed=embeds.error_embed(
+                    f"Couldn't remove alias: {e.detail or e.status}"
+                )
+            )
+            return
+        await self.bot.pjsk.remove_event_alias_local(ev.id, target)  # type: ignore[union-attr]
+        await interaction.followup.send(
+            embed=embeds.success_embed(
+                f"Removed alias for `{ev.name}` (ID `{ev.id}`)\nAlias: `{target}`",
                 title="Removed alias!",
             )
         )

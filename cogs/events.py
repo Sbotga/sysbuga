@@ -8,7 +8,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from data.models import Event
-from helpers import embeds, tools
+from data.search import preprocess
+from helpers import converters, embeds, tools
 from helpers.autocompletes import autocompletes
 from helpers.emojis import emojis
 from helpers.views import Paginator
@@ -16,6 +17,19 @@ from services.sbuga import SbugaError
 
 if TYPE_CHECKING:
     from main import SbugaBot
+
+_FIELD_LIMIT = 1024
+
+
+def _alias_field(values: list[str]) -> str:
+    """comma-joined aliases trimmed to fit an embed field"""
+    if not values:
+        return "*None*"
+    text = ", ".join(values)
+    if len(text) + 2 > _FIELD_LIMIT:
+        text = text[: _FIELD_LIMIT - 6].rsplit(", ", 1)[0] + ", …"
+    return f"`{text}`"
+
 
 EVENT_REGIONS = ["en", "jp", "tw", "kr"]
 EVENT_TYPE_NAMES = {
@@ -126,6 +140,31 @@ class EventsCog(commands.Cog):
             )
             return
         await interaction.followup.send(embed=self._event_embed(event_obj))
+
+    @event.command(name="aliases", description="View an event's aliases.")
+    @app_commands.autocomplete(event=autocompletes.pjsk_event)
+    @app_commands.describe(event="Event name or ID.")
+    async def aliases(self, interaction: discord.Interaction, event: str) -> None:
+        await interaction.response.defer(thinking=True)
+        ev = converters.match_event(self.bot.pjsk, event)  # type: ignore[arg-type]
+        if not ev:
+            await interaction.followup.send(
+                embed=embeds.error_embed(f"Couldn't find an event matching `{event}`.")
+            )
+            return
+        manual = sorted(self.bot.pjsk.event_aliases(ev.id))  # type: ignore[union-attr]
+        # the keys the matcher accepts, minus the manual aliases, the name, and the bare id
+        skip = {preprocess(a) for a in manual} | {preprocess(ev.name), str(ev.id)}
+        auto = [k for k in self.bot.pjsk.event_keys(ev.id) if k not in skip]  # type: ignore[union-attr]
+        embed = embeds.embed(
+            title="Aliases",
+            description=f"Aliases for `{ev.name}` (ID `{ev.id}`)",
+        )
+        embed.add_field(name="Manually Added", value=_alias_field(manual), inline=False)
+        embed.add_field(
+            name="Automatically Generated", value=_alias_field(auto), inline=False
+        )
+        await interaction.followup.send(embed=embed)
 
     @event.command(name="leaderboard", description="View the current event's top 100.")
     @app_commands.autocomplete(region=autocompletes.pjsk_region(EVENT_REGIONS))

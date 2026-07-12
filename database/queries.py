@@ -327,3 +327,21 @@ class UserData:
                 "SELECT guessing_enabled FROM guilds WHERE guild_id = $1", guild_id
             )
             return result["guessing_enabled"] if result else True
+
+    async def set_allow_leaks(self, guild_id: int, allowed: bool) -> bool:
+        await self.verify_discord_guild(guild_id)
+        async with self.db.acquire() as conn:
+            result = await conn.fetchrow(
+                "UPDATE guilds SET allow_leaks = $1 WHERE guild_id = $2 RETURNING allow_leaks",
+                allowed,
+                guild_id,
+            )
+            return result["allow_leaks"] if result else False
+
+    async def allow_leaks(self, guild_id: int) -> bool:
+        await self.verify_discord_guild(guild_id)
+        async with self.db.acquire() as conn:
+            result = await conn.fetchrow(
+                "SELECT allow_leaks FROM guilds WHERE guild_id = $1", guild_id
+            )
+            return result["allow_leaks"] if result else False
