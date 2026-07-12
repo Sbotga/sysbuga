@@ -768,7 +768,10 @@ class GuessCog(commands.Cog):
             await self.bot.user_data.add_guesses(message.author.id, data["guessing"], "success")  # type: ignore[union-attr]
             points = await self._award_points(message.author.id, data)
         if points:
-            description += f"\n\n**+`{points:,}`** leaderboard points!"
+            description += (
+                f"\n\n**+`{points:,}`** leaderboard points!"
+                "\n-# Use /guess weekly and /guess monthly to see your ranking!"
+            )
         elif points == 0:
             description += "\n\n-# No leaderboard points - guess limit reached."
         embed = embeds.success_embed(title="Correct", description=description)
@@ -1780,6 +1783,23 @@ class GuessCog(commands.Cog):
         embed.description = "\n".join(lines)
         return embed
 
+    def _earn_points_embed(self) -> discord.Embed:
+        embed = embeds.embed(title="How to Earn Points", color=discord.Color.gold())
+        modes = "\n".join(
+            f"**/guess {mode}** - starts at `{cfg['start']:,}` points"
+            for mode, cfg in GUESS_POINTS.items()
+        )
+        embed.description = (
+            "Only these guessing modes earn weekly/monthly leaderboard points:\n\n"
+            f"{modes}\n\n"
+            "-# Each hint used lowers what a correct guess is worth (down to `250` once all "
+            "hints are shown). Hints are shared - any hint used on a round lowers the points "
+            "for everyone who then guesses it.\n"
+            f"-# Correct guesses earn `0` past `{HOURLY_GUESS_LIMIT:,}` guesses/hour, "
+            f"`{DAILY_GUESS_LIMIT:,}`/day, or `{ROUND_GUESS_LIMIT}` guesses on one round."
+        )
+        return embed
+
     def _prizes_embed(self, period_type: str) -> discord.Embed:
         prizes = WEEKLY_PRIZES if period_type == "weekly" else MONTHLY_PRIZES
         label = "Weekly" if period_type == "weekly" else "Monthly"
@@ -1807,7 +1827,8 @@ class GuessCog(commands.Cog):
         notice = (
             "**__Prizes can only be claimed on the official Global PJSK server.__**\n"
             "-# Prizes are not sent automatically. Claim them manually with `/guess prize` "
-            "(or by keeping your DMs on), within 3 days."
+            "(or by keeping your DMs on), within 3 days.\n"
+            "-# You can opt out of these leaderboards in `/user settings`."
         )
         tos_url = get_config()["discord"].get("tos_url")
         if tos_url:
@@ -2222,6 +2243,14 @@ class _PointsBoardView(SbugaView):
             interaction.user.id, self.period_type, self.period_index
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Earn Points", style=discord.ButtonStyle.gray)
+    async def earn_points(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await interaction.response.send_message(
+            embed=self.cog._earn_points_embed(), ephemeral=True
+        )
 
     @discord.ui.button(label="Prizes", style=discord.ButtonStyle.gray)
     async def prizes(
