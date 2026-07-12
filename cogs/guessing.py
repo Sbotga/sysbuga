@@ -200,7 +200,7 @@ def _masked_name(name: str, fraction: float) -> str:
 
 # players must let at least this fraction of the round elapse before they can give up
 # music rounds are 5 minutes so they use a smaller fraction 1/15 which is 20s
-GIVEUP_FRACTION = 1 / 3
+GIVEUP_FRACTION = 1 / 4
 MUSIC_GIVEUP_FRACTION = 1 / 15
 
 
@@ -966,12 +966,10 @@ class GuessCog(commands.Cog):
                 else:
                     await interaction.followup.send(embed=err)
                 return
-            if (
-                embed.description
-            ):  # note when giving up unlocks and it also needs at least one hint used
+            if embed.description:  # note when giving up unlocks
                 embed.description = (
-                    f"-# You can give up in `{int(_giveup_seconds(mode))}` seconds "
-                    "(after using a hint).\n" + embed.description
+                    f"-# You can give up in `{int(_giveup_seconds(mode))}` seconds.\n"
+                    + embed.description
                 )
             start_line = _start_points_line(mode)  # only ranked modes
             if start_line:
@@ -1328,30 +1326,11 @@ class GuessCog(commands.Cog):
                 [],
                 None,
             )
-        # can't give up until enough time has passed and at least one hint has been used
-        if data["guessing"] in STAGED_MODES:
-            hint_used = data["data"].get("stage", 1) >= 2
-        else:
-            hint_used = data["data"].get("hint_stage", 0) >= 1
+        # can't give up until enough time has passed (no hint required)
         started = data.get("startTime")
         remaining = 0.0
         if started:
             remaining = started + _giveup_seconds(data["guessing"]) - time.time()
-        if not hint_used and remaining > 0:
-            return (
-                embeds.error_embed(
-                    "Cannot end the guess until you use a hint and "
-                    f"`{math.ceil(remaining)}` more seconds pass."
-                ),
-                [],
-                None,
-            )
-        if not hint_used:
-            return (
-                embeds.error_embed("Cannot end the guess until you use a hint."),
-                [],
-                None,
-            )
         if remaining > 0:
             return (
                 embeds.error_embed(
@@ -1828,7 +1807,8 @@ class GuessCog(commands.Cog):
     def _earn_points_embed(self) -> discord.Embed:
         embed = embeds.embed(title="How to Earn Points", color=discord.Color.gold())
         modes = "\n".join(
-            f"**/guess {mode}** - starts at `{cfg['start']:,}` points"
+            f"**/guess {mode}** - starts at `{cfg['start']:,}` points "
+            f"(per hint: {', '.join(f'`-{d:,}`' for d in cfg['deductions'])})"
             for mode, cfg in GUESS_POINTS.items()
         )
         embed.description = (

@@ -785,28 +785,11 @@ async def reveal_answer(
     meta = await redis_state.get_round(body.round_id)
     if not meta or meta["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="no active round")
-    # can't give up until enough time has passed and at least one hint has been used
-    if meta["mode"] in ("music", "event"):
-        hint_used = meta.get("stage", 1) >= 2
-    else:
-        hint_used = meta.get("hint_stage", 0) >= 1
+    # can't give up until enough time has passed (no hint required)
     started = meta.get("started_at")
     remaining = 0.0
     if started is not None:
         remaining = started + _giveup_seconds(meta["mode"]) - time.time()
-    if not hint_used and remaining > 0:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "Cannot end the guess until you use a hint and "
-                f"{math.ceil(remaining)} more seconds pass."
-            ),
-        )
-    if not hint_used:
-        raise HTTPException(
-            status_code=403,
-            detail="Cannot end the guess until you use a hint.",
-        )
     if remaining > 0:
         raise HTTPException(
             status_code=403,
