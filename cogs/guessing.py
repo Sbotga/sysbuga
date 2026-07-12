@@ -1815,9 +1815,10 @@ class GuessCog(commands.Cog):
         breakdown = await self.bot.user_data.get_points_breakdown(user_id, period_type, period_index)  # type: ignore[union-attr]
         label = "Week" if period_type == "weekly" else "Month"
         embed = embeds.embed(
-            title=f"Your {label} {period_index} Points", color=discord.Color.gold()
+            title=f"{label} {period_index} Points", color=discord.Color.gold()
         )
-        lines = [
+        lines = [f"Points for <@{user_id}>:\n"]
+        lines += [
             f"**{mode.title()}:** `{breakdown.get(mode, 0):,}`" for mode in GUESS_POINTS
         ]
         lines.append(f"\n**Total:** `{sum(breakdown.values()):,}`")
@@ -1833,9 +1834,10 @@ class GuessCog(commands.Cog):
         embed.description = (
             "Only these guessing modes earn weekly/monthly leaderboard points:\n\n"
             f"{modes}\n\n"
-            "-# Each hint used lowers what a correct guess is worth (down to `250` once all "
-            "hints are shown). Hints are shared - any hint used on a round lowers the points "
-            "for everyone who then guesses it.\n"
+            "**Each hint you use deducts points** from what a correct guess is worth, down to "
+            "`250` once all hints are shown.\n"
+            "-# Hints are shared - any hint used on a round lowers the points for everyone who "
+            "then guesses it.\n"
             f"-# Correct guesses earn `0` past `{HOURLY_GUESS_LIMIT:,}` guesses/hour, "
             f"`{DAILY_GUESS_LIMIT:,}`/day, or `{ROUND_GUESS_LIMIT}` guesses on one round."
         )
@@ -2283,22 +2285,20 @@ class _PointsBoardView(SbugaView):
         embed = await self.cog._breakdown_embed(
             interaction.user.id, self.period_type, self.period_index
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed)
 
     @discord.ui.button(label="Earn Points", style=discord.ButtonStyle.gray)
     async def earn_points(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        await interaction.response.send_message(
-            embed=self.cog._earn_points_embed(), ephemeral=True
-        )
+        await interaction.response.send_message(embed=self.cog._earn_points_embed())
 
     @discord.ui.button(label="Prizes", style=discord.ButtonStyle.gray)
     async def prizes(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
         await interaction.response.send_message(
-            embed=self.cog._prizes_embed(self.period_type), ephemeral=True
+            embed=self.cog._prizes_embed(self.period_type)
         )
 
 
