@@ -38,7 +38,7 @@ from data.pjsk import RARITY_DISPLAY, character_display_name
 from data.search import preprocess
 from data.song_equivalents import songs_equivalent
 from helpers import converters, unblock
-from services import chart_cache, chart_clip, chart_preview, song_clip
+from services import chart_cache, chart_clip, chart_preview, event_story, song_clip
 from webserver import redis_state, spectate
 
 if TYPE_CHECKING:
@@ -61,8 +61,11 @@ MODES: dict[str, str] = {
     "character": "Character",
     "character_bw": "Character (grayscale)",
     "event": "Event",
+    "event_story": "Event Story",
     "music": "Music",
 }
+# dialogue lines carry markdown for discord; the activity renders plain text
+_STRIP_MD = str.maketrans("", "", "*")
 
 router = APIRouter(prefix="/api/activity")
 
@@ -136,6 +139,13 @@ def _egg_prompt(descriptions: list[str]) -> str:
     return "⚠️ EASTER EGG! " + " ".join(descriptions)
 
 
+def _story_prompt(lines: list[str], count: int, unit: "str | None" = None) -> str:
+    text = "Which event is this dialogue from?\n\n" + "\n".join(lines[:count])
+    if unit:
+        text += f"\n\nEvent unit: {unit}"
+    return text
+
+
 async def _build_round(
     pjsk: "PJSKData", sbuga: "SbugaClient", mode: str
 ) -> dict[str, Any] | None:
@@ -175,7 +185,6 @@ async def _build_round(
             round_data["reveal"] = await _safe_fetch(music.jacket_url)
             round_data["image"] = clip
             round_data["image_media"] = "audio/mpeg"
-            round_data["audio_url"] = url  # re-fetched for the reveal never stored
             round_data["audio"] = audio  # only to pre-cut the stages not persisted
             round_data["start"] = start
             round_data["stage"] = 1
@@ -354,6 +363,35 @@ async def _build_round(
         ).getvalue()
         return round_data
 
+    if mode == "event_story":
+        try:
+            eligible = await event_story.eligible_event_ids(sbuga)
+        except Exception:
+            return None
+        ids = [
+            eid
+            for eid in eligible
+            if (ev := pjsk.get_event(eid)) and (ev.start_at or 0) <= now_ms
+        ]
+        random.shuffle(ids)
+        for eid in ids[:6]:
+            lines = await event_story.pick_snippet(sbuga, eid, random)
+            if not lines:
+                continue
+            event = pjsk.get_event(eid)
+            plain = [line.translate(_STRIP_MD) for line in lines]
+            url = event.background_url or event.banner_url
+            round_data["type"] = "event"
+            round_data["answer_id"] = event.id
+            round_data["answer_name"] = event.name
+            round_data["reveal"] = await _safe_fetch(url) if url else None
+            round_data["lines"] = plain
+            round_data["stage"] = 1
+            round_data["unit"] = event_story.unit_display(event.unit)
+            round_data["prompt"] = _story_prompt(plain, event_story.STAGE_LINES[1])
+            return round_data
+        return None
+
     return None
 
 
@@ -387,13 +425,17 @@ def _meta(
         "user_id": user_id,
         "finished": False,
     }
-    if "stage" in round_data:  # music mode tracks audio-clip progression
+    if round_data.get("mode") == "event_story":  # staged dialogue snippet
+        meta["stage"] = round_data["stage"]
+        meta["max_stage"] = event_story.MAX_STAGE
+        meta["last_hint"] = 0.0
+        meta["lines"] = round_data["lines"]
+        meta["unit"] = round_data.get("unit") or "Mixed"
+    elif "stage" in round_data:  # music mode tracks audio-clip progression
         meta["stage"] = round_data["stage"]
         meta["max_stage"] = song_clip.MAX_STAGE
         meta["last_hint"] = 0.0
         meta["start"] = round_data["start"]
-        meta["audio_url"] = round_data["audio_url"]  # re-fetched for the reveal
-        meta["has_full"] = bool(round_data.get("audio_url"))
         meta["cover_type"] = round_data.get("cover_type")  # revealed on the final hint
     else:  # everything else uses cumulative tiered text hints
         meta["hint"] = round_data.get("hint") or {}
@@ -477,10 +519,9 @@ async def start_round(
         "expires_at": expires_at,
         "giveup_at": now + _giveup_seconds(body.mode),
     }
-    if "stage" in meta:  # music mode
+    if "stage" in meta:  # staged modes (music, event_story)
         resp["stage"] = meta["stage"]
         resp["max_stage"] = meta["max_stage"]
-        resp["has_full"] = meta.get("has_full", False)
     else:  # tiered text hints where give-up needs all of them used
         resp["hint_stage"] = 0
         resp["max_hints"] = MAX_TEXT_HINTS
@@ -503,18 +544,6 @@ async def round_reveal(round_id: str) -> Response:
     if not img:
         raise HTTPException(status_code=404, detail="not found")
     return Response(content=img, media_type="image/png")
-
-
-@router.get("/guess/round/{round_id}/full")
-async def round_full(round_id: str) -> Response:
-    """the whole song audio shown on a music round's reveal
-    re-fetched from its url so we never keep the megabytes around"""
-    meta = await redis_state.get_round(round_id)
-    url = (meta or {}).get("audio_url")
-    audio = await _safe_fetch(url) if url else None
-    if not audio:
-        raise HTTPException(status_code=404, detail="not found")
-    return Response(content=audio, media_type="audio/mpeg")
 
 
 async def _pregen_music_stages(round_id: str, audio: bytes, start: float) -> None:
@@ -541,6 +570,8 @@ async def hint(
     user_data = _user_data(request.app.state)
     if meta["mode"] == "music":
         return await _music_hint(body.round_id, meta, user_id, user_data)
+    if meta["mode"] == "event_story":
+        return await _story_hint(body.round_id, meta, user_id, user_data)
     return await _tiered_hint(body.round_id, meta, user_id, user_data)
 
 
@@ -638,13 +669,10 @@ async def _music_hint(
             status_code=429, detail="Please wait a moment before the next hint."
         )
     stage += 1
-    # the pre-generated clip if it's ready else re-fetch the song and cut this one
+    # the pre-generated clip (the song url isn't kept, so a stage that failed to cut is a miss)
     clip = await redis_state.get_round_stage(round_id, stage)
     if not clip:
-        audio = await _safe_fetch(meta.get("audio_url"))
-        if not audio:
-            raise HTTPException(status_code=404, detail="clip unavailable")
-        clip = await song_clip.stage_clip(audio, meta.get("start", 0.0), stage)
+        raise HTTPException(status_code=404, detail="clip unavailable")
     meta["stage"] = stage
     meta["last_hint"] = now
     await redis_state.set_round_image(round_id, clip)
@@ -662,6 +690,42 @@ async def _music_hint(
     return resp
 
 
+async def _story_hint(
+    round_id: str, meta: dict[str, Any], user_id: int, user_data: "UserData | None"
+) -> dict[str, Any]:
+    stage = meta.get("stage", 1)
+    lines = meta.get("lines", [])
+    if stage >= event_story.MAX_STAGE:
+        return {
+            "stage": stage,
+            "max_stage": event_story.MAX_STAGE,
+            "dialogue": _story_prompt(
+                lines, event_story.STAGE_LINES[stage], meta.get("unit")
+            ),
+            "done": True,
+            "already": True,
+        }
+    now = time.time()
+    if now - meta.get("last_hint", 0.0) < HINT_COOLDOWN:
+        raise HTTPException(
+            status_code=429, detail="Please wait a moment before the next hint."
+        )
+    stage += 1
+    meta["stage"] = stage
+    meta["last_hint"] = now
+    await redis_state.update_round(round_id, meta)
+    if user_data:
+        await user_data.add_guesses(user_id, meta["mode"], "hint")
+    # the final stage also names the event's unit
+    unit = meta.get("unit") if stage >= event_story.MAX_STAGE else None
+    return {
+        "stage": stage,
+        "max_stage": event_story.MAX_STAGE,
+        "dialogue": _story_prompt(lines, event_story.STAGE_LINES[stage], unit),
+        "done": stage >= event_story.MAX_STAGE,
+    }
+
+
 @router.post("/guess/reveal")
 async def reveal_answer(
     body: RoundBody,
@@ -674,7 +738,7 @@ async def reveal_answer(
     if not meta or meta["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="no active round")
     # can't give up until enough time has passed and at least one hint has been used
-    if meta["mode"] == "music":
+    if meta["mode"] in ("music", "event_story"):
         hint_used = meta.get("stage", 1) >= 2
     else:
         hint_used = meta.get("hint_stage", 0) >= 1

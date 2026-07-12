@@ -219,7 +219,7 @@ function refreshGiveup() {
     : 0;
   const timeOk = secsLeft <= 0;
   const hintsOk =
-    currentRound.mode === "music"
+    currentRound.max_stage // staged modes (music, event story) track stage
       ? (currentRound.stage || 1) >= 2
       : (currentRound.hints_used || 0) >= 1;
   btn.disabled = !(timeOk && hintsOk);
@@ -399,6 +399,7 @@ async function startRound(mode) {
 
   currentRound = round;
   $("round-prompt").textContent = round.prompt || "";
+  $("round-prompt").style.whiteSpace = "pre-wrap"; // event-story dialogue is multi-line
   if (round.has_image) {
     setRoundMedia("round-image", "round-video", round);
   }
@@ -442,15 +443,7 @@ function showReveal(round, message, cls) {
   } else {
     clearRoundMedia("round-image", "round-video");
   }
-  if (round.has_full) {
-    // music reveal plays the whole song alongside the jacket
-    const audio = $("round-audio");
-    audio.src = `${API}/api/activity/guess/round/${round.round_id}/full`;
-    audio.hidden = false;
-    audio.play().catch(() => {});
-  } else {
-    clearAudio($("round-audio"));
-  }
+  clearAudio($("round-audio")); // music reveal shows just the jacket, no full song
   myResult = {
     text: message,
     cls: cls || "",
@@ -547,7 +540,15 @@ async function useHint() {
       method: "POST",
       body: JSON.stringify({ round_id: currentRound.round_id }),
     });
-    if (res.lines !== undefined) {
+    if (res.dialogue !== undefined) {
+      // event story: reveal more consecutive dialogue lines (and the unit) in place
+      $("round-prompt").textContent = res.dialogue;
+      if (!res.already) {
+        if (currentRound) currentRound.stage = res.stage;
+        playerLog("💡", `More dialogue revealed (${res.stage}/${res.max_stage})`, "hint");
+        refreshGiveup();
+      }
+    } else if (res.lines !== undefined) {
       // tiered text hint where the log already holds prior tiers so show just the newest
       if (!res.advanced) {
         setResult("All hints have been revealed.", "");

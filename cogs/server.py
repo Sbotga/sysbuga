@@ -34,30 +34,66 @@ class ServerCog(commands.Cog):
         )
         return False
 
+    leaks = app_commands.Group(
+        name="leaks",
+        description="Channels where leaked (unreleased) content is shown.",
+        parent=server,
+    )
+
     @server.command(name="settings", description="View this server's settings.")
     async def settings(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
-        allow_leaks = await self.bot.user_data.allow_leaks(interaction.guild_id)  # type: ignore[union-attr,arg-type]
+        channels = await self.bot.user_data.leak_channels(interaction.guild_id)  # type: ignore[union-attr,arg-type]
+        listed = ", ".join(f"<#{c}>" for c in channels) if channels else "None"
         embed = embeds.embed(title="Server Settings", color=discord.Color.blurple())
-        embed.description = f"**Allow Leaks:** {'ON' if allow_leaks else 'OFF'}"
+        embed.description = f"**Leak Channels:** {listed}"
         await interaction.followup.send(embed=embed)
 
-    @server.command(
-        name="allow_leaks",
-        description="Allow unreleased (leaked) content, shown behind spoilers.",
+    @leaks.command(
+        name="add", description="Allow leaked content to be shown in a channel."
     )
-    @app_commands.describe(on="Whether leaks are allowed in this server.")
-    async def allow_leaks(self, interaction: discord.Interaction, on: bool) -> None:
+    @app_commands.describe(channel="The channel to allow leaks in.")
+    async def leaks_add(
+        self, interaction: discord.Interaction, channel: discord.TextChannel
+    ) -> None:
         await interaction.response.defer()
         if not await self._needs_manage(interaction):
             return
-        state = await self.bot.user_data.set_allow_leaks(interaction.guild_id, on)  # type: ignore[union-attr,arg-type]
+        await self.bot.user_data.add_leak_channel(interaction.guild_id, channel.id)  # type: ignore[union-attr,arg-type]
+        await interaction.followup.send(
+            embed=embeds.success_embed(f"Leaks are now shown in {channel.mention}.")
+        )
+
+    @leaks.command(
+        name="remove", description="Stop showing leaked content in a channel."
+    )
+    @app_commands.describe(channel="The channel to block leaks in again.")
+    async def leaks_remove(
+        self, interaction: discord.Interaction, channel: discord.TextChannel
+    ) -> None:
+        await interaction.response.defer()
+        if not await self._needs_manage(interaction):
+            return
+        removed = await self.bot.user_data.remove_leak_channel(channel.id)  # type: ignore[union-attr]
         await interaction.followup.send(
             embed=embeds.success_embed(
-                f"Leaks are now **{'ALLOWED (spoilered)' if state else 'BLOCKED'}** "
-                "in this server."
+                f"Leaks are no longer shown in {channel.mention}."
+                if removed
+                else f"{channel.mention} wasn't a leak channel."
             )
         )
+
+    @leaks.command(name="list", description="List this server's leak channels.")
+    async def leaks_list(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        channels = await self.bot.user_data.leak_channels(interaction.guild_id)  # type: ignore[union-attr,arg-type]
+        embed = embeds.embed(title="Leak Channels", color=discord.Color.blurple())
+        embed.description = (
+            "\n".join(f"- <#{c}>" for c in channels)
+            if channels
+            else "No channels show leaks. Add one with `/server leaks add`."
+        )
+        await interaction.followup.send(embed=embed)
 
 
 async def setup(bot: SbugaBot) -> None:

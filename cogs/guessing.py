@@ -20,7 +20,7 @@ from helpers.autocompletes import autocompletes
 from helpers.emojis import emojis
 from helpers.imaging import _crop_chart, _crop_square
 from helpers.views import SbugaView
-from services import chart_cache, chart_clip, chart_preview, song_clip
+from services import chart_cache, chart_clip, chart_preview, event_story, song_clip
 from services.sbuga import SbugaError
 
 if TYPE_CHECKING:
@@ -34,7 +34,10 @@ MODE_TIME = {
     "chart_append": 90,
     "chart_expert": 90,
     "music": 300,
+    "event_story": 180,
 }
+# modes whose hints extend a snippet by stage (like music) rather than adding tiered facts
+STAGED_MODES = {"music", "event_story"}
 GUESS_PREFIX = "-"
 # appended to every not-found or wrong-guess reply
 GUESS_TIP = "\n-# Use `-hint` for a hint, `-end` to give up, or `-time` for time left!"
@@ -338,6 +341,31 @@ class GuessCog(commands.Cog):
                 return event, background
         return None
 
+    async def _pick_event_story(self):
+        """(event, background | None, dialogue lines) for a random english event with a story,
+        rerolling past events with no usable dialogue. None if nothing is usable."""
+        try:
+            eligible = await event_story.eligible_event_ids(self.bot.sbuga)  # type: ignore[arg-type]
+        except SbugaError:
+            return None
+        # only released events we can actually name and match a guess against
+        ids = [
+            eid
+            for eid in eligible
+            if self.bot.pjsk.get_event(eid)  # type: ignore[union-attr]
+            and not self.bot.pjsk.is_event_leaked(eid)  # type: ignore[union-attr]
+        ]
+        random.shuffle(ids)
+        for eid in ids[:_ASSET_ATTEMPTS]:
+            lines = await event_story.pick_snippet(self.bot.sbuga, eid, random)  # type: ignore[arg-type]
+            if not lines:
+                continue
+            event = self.bot.pjsk.get_event(eid)  # type: ignore[union-attr]
+            url = event.background_url or event.banner_url
+            background = await _fetch_bytes(url) if url else None
+            return event, background, lines
+        return None
+
     # --- helpers ---
 
     @staticmethod
@@ -462,13 +490,6 @@ class GuessCog(commands.Cog):
                 discord.File(io.BytesIO(data["data"]["answer_video"]), "answer.mp4")
             )
             kwargs["video"] = True
-        if data["guessing"] == "music" and data["data"].get("audio_url"):
-            # reveal the full song alongside the jacket which is re-fetched not held
-            audio = await _fetch_bytes(data["data"]["audio_url"])
-            if audio:
-                name = _safe_filename(str(data["answerName"]))
-                files.append(discord.File(io.BytesIO(audio), f"{name}.mp3"))
-                kwargs["audio"] = True
         return files, kwargs
 
     # --- timeout loop ---
@@ -681,12 +702,10 @@ class GuessCog(commands.Cog):
         if not await self.channel_checks(interaction):
             return
 
-        # cached once per round so guess checking doesn't hit the db each guess; when off, a
-        # guess that resolves to a leak is hidden so we never reveal an unreleased title
-        allow_leaks = bool(
-            interaction.guild
-            and await self.bot.user_data.allow_leaks(interaction.guild_id)  # type: ignore[union-attr,arg-type]
-        )
+        # cached once per round so guess checking doesn't hit the db each guess; off unless this
+        # channel is a leak channel, and then a guess that resolves to a leak is hidden so we
+        # never reveal an unreleased title
+        allow_leaks = await self.bot.user_data.channel_leaks_allowed(interaction.channel_id)  # type: ignore[union-attr,arg-type]
         guess: dict[str, Any] = {
             "guessers": set(),  # user ids who've made a guess and are needed to give up
             "host": interaction.user.id,  # the starter can give up without guessing
@@ -774,7 +793,7 @@ class GuessCog(commands.Cog):
             if jacket:
                 guess["answer_file_path"] = io.BytesIO(jacket)
             data = guess["data"]
-            data["audio_url"] = url  # re-fetched only for the reveal never held
+            # the url isn't kept: the stage clips are pre-cut here and the reveal is just jacket
             data["start"] = start
             data["stage"] = 1
             data["last_hint"] = 0.0
@@ -954,6 +973,34 @@ class GuessCog(commands.Cog):
             embed.description = f"Guess the event from a cropped background.\nUse `{GUESS_PREFIX}your guess` to guess, `{GUESS_PREFIX}hint` for a hint, `{GUESS_PREFIX}end` to give up, or `{GUESS_PREFIX}time` for time left. You have {secs} seconds."
             return embed, discord.File(cropped, "image.png")
 
+        if mode == "event_story":
+            guess["guessType"] = "event"
+            hit = await self._pick_event_story()
+            if not hit:
+                return None, None
+            event, bg, lines = hit
+            guess["answer"] = event.id
+            guess["answerName"] = event.name
+            if bg:  # shown on the reveal
+                guess["answer_file_path"] = io.BytesIO(bg)
+            data = guess["data"]
+            data["lines"] = lines
+            data["stage"] = 1
+            data["last_hint"] = 0.0
+            # unit revealed on the final hint ("none" -> "Mixed")
+            data["unit"] = event_story.unit_display(event.unit)
+            snippet = "\n".join(lines[: event_story.STAGE_LINES[1]])
+            embed = embeds.embed(
+                title="Guess The Event Story", color=discord.Color.dark_gold()
+            )
+            embed.description = (
+                f"Which event is this dialogue from?\n\n{snippet}\n\n"
+                f"Use `{GUESS_PREFIX}your guess` to guess, `{GUESS_PREFIX}hint` for more "
+                f"lines, `{GUESS_PREFIX}end` to give up, or `{GUESS_PREFIX}time` for time left. "
+                f"You have {secs} seconds."
+            )
+            return embed, None
+
         return None, None
 
     # --- commands ---
@@ -1033,6 +1080,13 @@ class GuessCog(commands.Cog):
     async def music(self, interaction: discord.Interaction) -> None:
         await self.handle_guess(interaction, "music")
 
+    @guess.command(
+        name="event_story",
+        description="Guess the event from a snippet of its story dialogue.",
+    )
+    async def guess_event_story(self, interaction: discord.Interaction) -> None:
+        await self.handle_guess(interaction, "event_story")
+
     async def _resolve_end(
         self, channel_id: int, user_id: int
     ) -> tuple[discord.Embed, list[discord.File], "_GuessResultView | None"]:
@@ -1053,7 +1107,7 @@ class GuessCog(commands.Cog):
                 None,
             )
         # can't give up until enough time has passed and at least one hint has been used
-        if data["guessing"] == "music":
+        if data["guessing"] in STAGED_MODES:
             hint_used = data["data"].get("stage", 1) >= 2
         else:
             hint_used = data["data"].get("hint_stage", 0) >= 1
@@ -1159,8 +1213,8 @@ class GuessCog(commands.Cog):
         return None
 
     async def _music_clip(self, d: dict, stage: int) -> bytes | None:
-        """the stage clip from the pre-generated cache
-        else wait for the background cutter else re-fetch the song and cut this one"""
+        """the stage clip from the pre-generated cache, else wait for the background cutter
+        (the url isn't kept, so a stage that failed to cut just returns None)"""
         clip = d["clips"].get(stage)
         if clip is not None:
             return clip
@@ -1170,20 +1224,7 @@ class GuessCog(commands.Cog):
                 await task
             except Exception:
                 pass
-            clip = d["clips"].get(stage)
-            if clip is not None:
-                return clip
-        audio = await _fetch_bytes(
-            d["audio_url"]
-        )  # background cut failed so do it once now
-        if not audio:
-            return None
-        try:
-            clip = await song_clip.stage_clip(audio, d["start"], stage)
-        except song_clip.SongClipError:
-            return None
-        d["clips"][stage] = clip
-        return clip
+        return d["clips"].get(stage)
 
     async def _music_hint(
         self, data: dict
@@ -1229,6 +1270,42 @@ class GuessCog(commands.Cog):
             [discord.File(io.BytesIO(clip), song_clip.clip_filename(stage))],
             True,
         )
+
+    async def _story_hint(
+        self, data: dict
+    ) -> tuple[discord.Embed, list[discord.File], bool]:
+        """event-story hints reveal more dialogue lines (stage 1 to 4), rate-limited"""
+        d = data["data"]
+        stage = d.get("stage", 1)
+        if stage >= event_story.MAX_STAGE:
+            return (
+                embeds.embed(
+                    title=f"Guess Hint - Stage {event_story.MAX_STAGE}/{event_story.MAX_STAGE}",
+                    description="All the dialogue lines are already shown.",
+                    color=discord.Color.red(),
+                ),
+                [],
+                False,
+            )
+        now = time.time()
+        if now - d.get("last_hint", 0.0) < HINT_COOLDOWN:
+            return (
+                embeds.error_embed("Please wait a moment before the next hint."),
+                [],
+                False,
+            )
+        d["last_hint"] = now
+        stage += 1
+        d["stage"] = stage
+        snippet = "\n".join(d["lines"][: event_story.STAGE_LINES[stage]])
+        if stage >= event_story.MAX_STAGE:
+            snippet += f"\n\n**Event unit:** {d.get('unit', 'Mixed')}"
+        embed = embeds.embed(
+            title=f"Guess Hint - Stage {stage}/{event_story.MAX_STAGE}",
+            description=snippet,
+            color=discord.Color.red(),
+        )
+        return embed, [], True
 
     async def _tier_lines(
         self, data: dict, stage: int
@@ -1297,6 +1374,8 @@ class GuessCog(commands.Cog):
         revealed so far"""
         if data["guessing"] == "music":
             return await self._music_hint(data)
+        if data["guessing"] == "event_story":
+            return await self._story_hint(data)
         if data["guessType"] not in ("song", "character", "event"):
             return (
                 embeds.embed(

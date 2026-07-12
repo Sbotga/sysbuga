@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import time
-from io import BytesIO
+from io import BytesIO, StringIO
 from typing import TYPE_CHECKING, Literal
 
 import aiohttp
@@ -12,7 +13,7 @@ from discord.ext import commands
 
 from data.models import Music
 from data.search import preprocess
-from helpers import converters, embeds, leaks, tools
+from helpers import converters, embeds, tools
 from helpers.autocompletes import autocompletes
 from helpers.emojis import emojis
 from helpers.views import LinkButtonView, SbugaView
@@ -53,6 +54,21 @@ def _alias_field(values: list[str]) -> str:
     return f"`{text}`"
 
 
+def _extract_bpms(sus_text: str) -> list[float]:
+    """distinct consecutive bpm values across a chart, in order (runs in a worker process)"""
+    from sonolus_converters import sus
+
+    score = sus.load(StringIO(sus_text))
+    out: list[float] = []
+    for note in sorted(
+        (n for n in score.notes if getattr(n, "type", "") == "bpm"),
+        key=lambda n: n.beat,
+    ):
+        if not out or out[-1] != note.bpm:
+            out.append(note.bpm)
+    return out
+
+
 class SongInfo(commands.Cog):
     def __init__(self, bot: SbugaBot) -> None:
         self.bot = bot
@@ -76,23 +92,46 @@ class SongInfo(commands.Cog):
             )
         return music
 
-    async def _leak_status(
+    async def _leak_blocked(
         self, interaction: discord.Interaction, music_id: int
-    ) -> str:
-        """'ok' if the song is released, else 'spoiler' when this server allows leaks or
-        'block' when it doesn't - the shared leak gate for every public song command"""
+    ) -> bool:
+        """True when the song is a leak and this channel isn't whitelisted for leaks - the
+        shared gate for every public song command"""
         if not self.bot.pjsk.is_music_leaked(music_id):  # type: ignore[union-attr]
-            return "ok"
-        allow = interaction.guild and await self.bot.user_data.allow_leaks(interaction.guild_id)  # type: ignore[union-attr,arg-type]
-        return "spoiler" if allow else "block"
+            return False
+        return not await self.bot.user_data.channel_leaks_allowed(interaction.channel_id)  # type: ignore[union-attr,arg-type]
 
-    async def _fetch(self, url: str) -> bytes | None:
+    async def _song_bpms(self, music: Music) -> list[float]:
+        """every bpm the song runs at, read from any of its charts (the tempo map is shared),
+        or [] if no chart is available"""
+        diffs = {d.difficulty for d in music.difficulties}
+        diff = next(
+            (
+                d
+                for d in ("master", "expert", "append", "hard", "normal", "easy")
+                if d in diffs
+            ),
+            None,
+        )
+        if not diff:
+            return []
+        region = next(
+            (r for r in self.bot.pjsk.regions_for_music(music.id) if r in ("en", "jp")),  # type: ignore[union-attr]
+            "en",
+        )
+        url = self.bot.pjsk.chart_source_url(music.id, diff, region)  # type: ignore[union-attr]
         try:
             async with aiohttp.ClientSession() as cs:
                 async with cs.get(url) as resp:
-                    return await resp.read() if resp.status == 200 else None
+                    raw = await resp.read() if resp.status == 200 else None
+            if not raw:
+                return []
+            # sus parsing is pure-cpu; keep it off the event loop like chart_clip does
+            return await asyncio.get_running_loop().run_in_executor(
+                None, _extract_bpms, raw.decode("utf-8", "replace")
+            )
         except Exception:
-            return None
+            return []
 
     async def _default_difficulty(self, user_id: int, difficulty: str) -> str:
         if difficulty == "default":
@@ -117,23 +156,8 @@ class SongInfo(commands.Cog):
         music = await self._resolve_song(interaction, song)
         if not music:
             return
-        status = await self._leak_status(interaction, music.id)
-        if status == "block":
+        if await self._leak_blocked(interaction, music.id):
             await interaction.followup.send(embed=embeds.leak_embed())
-            return
-        if status == "spoiler":
-            jacket = await self._fetch(music.jacket_url)
-            files = (
-                [discord.File(BytesIO(jacket), "jacket.png", spoiler=True)]
-                if jacket
-                else []
-            )
-            embed = embeds.embed(
-                description=leaks.leak_notice()
-                + "\n"
-                + leaks.spoiler_text(f"Jacket for {music.title}")
-            )
-            await interaction.followup.send(embed=embed, files=files)
             return
         embed = embeds.embed(title=music.title)
         embed.set_image(url=music.jacket_url)
@@ -156,11 +180,9 @@ class SongInfo(commands.Cog):
         music = await self._resolve_song(interaction, song)
         if not music:
             return
-        status = await self._leak_status(interaction, music.id)
-        if status == "block":
+        if await self._leak_blocked(interaction, music.id):
             await interaction.followup.send(embed=embeds.leak_embed())
             return
-        leaked = status == "spoiler"
         diff = converters.match_difficulty(
             await self._default_difficulty(interaction.user.id, difficulty)
         )
@@ -172,23 +194,14 @@ class SongInfo(commands.Cog):
             )
             return
         assert self.bot.constants
-
-        def finish(desc: str) -> str:
-            return (
-                leaks.leak_notice() + "\n" + leaks.spoiler_text(desc)
-                if leaked
-                else desc
-            )
-
-        embed = embeds.embed(title="Chart Constant" if leaked else music.title)
-        if not leaked:
-            embed.set_thumbnail(url=music.jacket_url)
+        embed = embeds.embed(title=music.title)
+        embed.set_thumbnail(url=music.jacket_url)
         try:
             constant, source = await self.bot.constants.get(
                 music.id, diff, True, error_on_not_found=True, include_source=True
             )  # type: ignore[misc]
         except IndexError:
-            embed.description = finish(
+            embed.description = (
                 f"**{emojis.difficulty_colors[diff]} {diff.title()}** isn't rated yet "
                 "(or doesn't exist for this song)."
             )
@@ -197,7 +210,7 @@ class SongInfo(commands.Cog):
             return
         level = self.bot.pjsk.get_play_level(music.id, diff)  # type: ignore[union-attr]
         constant_str = f"{math.ceil(float(constant) * 10) / 10:.1f}"
-        embed.description = finish(
+        embed.description = (
             f"**Difficulty:** {emojis.difficulty_colors[diff]} {diff.title()}\n\n"
             f"**Level:** `{level}`\n**Constant:** `{constant_str}`\n**Source:** `{source}`\n\n"
             "-# Constants are opinionated and will differ per person."
@@ -226,11 +239,9 @@ class SongInfo(commands.Cog):
         music = await self._resolve_song(interaction, song)
         if not music:
             return
-        status = await self._leak_status(interaction, music.id)
-        if status == "block":
+        if await self._leak_blocked(interaction, music.id):
             await interaction.followup.send(embed=embeds.leak_embed())
             return
-        leaked = status == "spoiler"
         if mirror is None:
             mirror = await self.bot.user_data.get_settings(interaction.user.id, "mirror_charts_by_default")  # type: ignore[union-attr]
         diff = converters.match_difficulty(
@@ -242,7 +253,7 @@ class SongInfo(commands.Cog):
             )
             return
 
-        embed = embeds.embed(title="Chart" if leaked else music.title)
+        embed = embeds.embed(title=music.title)
         chart_bytes = None
         used_region = None
         regions = (
@@ -263,12 +274,7 @@ class SongInfo(commands.Cog):
                 )
                 return
         if not chart_bytes:
-            desc = f"**{emojis.difficulty_colors[diff]} {diff.title()}** doesn't exist for this song."
-            embed.description = (
-                leaks.leak_notice() + "\n" + leaks.spoiler_text(desc)
-                if leaked
-                else desc
-            )
+            embed.description = f"**{emojis.difficulty_colors[diff]} {diff.title()}** doesn't exist for this song."
             embed.color = discord.Color.red()
             await interaction.followup.send(embed=embed)
             return
@@ -276,14 +282,6 @@ class SongInfo(commands.Cog):
         desc = f"**Difficulty:** {emojis.difficulty_colors[diff]} {diff.title()}"
         if mirror:
             desc += "\n\n**MIRRORED CHART**"
-        if leaked:
-            # spoiler the chart image and text, and drop the link button (its url is the song id)
-            embed.description = leaks.leak_notice() + "\n" + leaks.spoiler_text(desc)
-            await interaction.followup.send(
-                embed=embed,
-                file=discord.File(BytesIO(chart_bytes), "chart.png", spoiler=True),
-            )
-            return
         embed.set_image(url="attachment://chart.png")
         embed.description = desc
         url = (
@@ -446,11 +444,9 @@ class SongInfo(commands.Cog):
         music = await self._resolve_song(interaction, song)
         if not music:
             return
-        status = await self._leak_status(interaction, music.id)
-        if status == "block":
+        if await self._leak_blocked(interaction, music.id):
             await interaction.followup.send(embed=embeds.leak_embed())
             return
-        leaked = status == "spoiler"
 
         by = ", ".join(
             sorted(
@@ -472,11 +468,13 @@ class SongInfo(commands.Cog):
                     f"`({entry.total_note_count} notes)`"
                 )
 
-        lines = [", ".join(music.categories) if music.categories else ""]
-        lines.append(
+        bpms = await self._song_bpms(music)
+        lines = [
             f"**Server Availability:** `{', '.join(r.upper() for r in regions) or 'None'}`"
-        )
+        ]
         lines.append(f"**ID:** `{music.id}`")
+        if bpms:
+            lines.append(f"**BPM:** `{' - '.join(f'{b:g}' for b in bpms)}`")
         if by:
             lines.append(f"**By:** {by}")
         if music.artist:
@@ -489,24 +487,9 @@ class SongInfo(commands.Cog):
         lines.extend(diff_lines)
 
         body = "\n".join(filter(None, lines)).strip()
-        files: list[discord.File] = []
-        if leaked:  # allowed here, so show it spoilered rather than blocking
-            body = f"**{music.title}**\n{body}"
-            embed = embeds.embed(
-                description=leaks.leak_notice() + "\n" + leaks.spoiler_text(body)
-            )
-            try:
-                async with aiohttp.ClientSession() as cs:
-                    async with cs.get(music.jacket_url) as resp:
-                        jacket = await resp.read() if resp.status == 200 else None
-            except Exception:
-                jacket = None
-            if jacket:
-                files.append(discord.File(BytesIO(jacket), "jacket.png", spoiler=True))
-        else:
-            embed = embeds.embed(title=music.title, description=body)
-            embed.set_thumbnail(url=music.jacket_url)
-        await interaction.followup.send(embed=embed, files=files)
+        embed = embeds.embed(title=music.title, description=body)
+        embed.set_thumbnail(url=music.jacket_url)
+        await interaction.followup.send(embed=embed)
 
     @song.command(name="aliases", description="View a song's aliases.")
     @app_commands.autocomplete(song=autocompletes.pjsk_song)
@@ -516,11 +499,9 @@ class SongInfo(commands.Cog):
         music = await self._resolve_song(interaction, song)
         if not music:
             return
-        status = await self._leak_status(interaction, music.id)
-        if status == "block":
+        if await self._leak_blocked(interaction, music.id):
             await interaction.followup.send(embed=embeds.leak_embed())
             return
-        leaked = status == "spoiler"
 
         manual = sorted(self.bot.pjsk.song_aliases(music.id))  # type: ignore[union-attr]
 
@@ -532,16 +513,14 @@ class SongInfo(commands.Cog):
         }
         auto = [k for k in self.bot.pjsk.song_keys(music.id) if k not in skip]  # type: ignore[union-attr]
 
-        header = f"Aliases for `{music.title}` (ID `{music.id}`)"
-        manual_field = _alias_field(manual)
-        auto_field = _alias_field(auto)
-        if leaked:  # allowed here, so spoiler everything and flag it
-            header = leaks.leak_notice() + "\n" + leaks.spoiler_text(header)
-            manual_field = leaks.spoiler_text(manual_field)
-            auto_field = leaks.spoiler_text(auto_field)
-        embed = embeds.embed(title="Aliases", description=header)
-        embed.add_field(name="Manually Added", value=manual_field, inline=False)
-        embed.add_field(name="Automatically Generated", value=auto_field, inline=False)
+        embed = embeds.embed(
+            title="Aliases",
+            description=f"Aliases for `{music.title}` (ID `{music.id}`)",
+        )
+        embed.add_field(name="Manually Added", value=_alias_field(manual), inline=False)
+        embed.add_field(
+            name="Automatically Generated", value=_alias_field(auto), inline=False
+        )
         await interaction.followup.send(embed=embed)
 
     def _chart_constant(self, music_id: int, difficulty: str) -> float | None:

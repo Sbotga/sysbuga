@@ -104,7 +104,7 @@ async def stage_clip(audio: bytes, start: float, stage: int) -> bytes:
     """the first STAGE_SECONDS[stage] seconds of the window that begins at start"""
     # cut a touch short of the advertised length so discord's rounded-up duration display
     # matches (a 1.0s mp3 shows as 2s otherwise)
-    seconds = max(0.1, STAGE_SECONDS.get(stage, FULL_SECONDS) - 0.1)
+    seconds = max(0.1, STAGE_SECONDS.get(stage, FULL_SECONDS))
     _TMP_BASE.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="stage_", dir=_TMP_BASE) as tmp:
         src = Path(tmp) / "full.mp3"

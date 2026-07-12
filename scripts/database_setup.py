@@ -21,11 +21,19 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS guilds (
     id SERIAL PRIMARY KEY,
     guild_id BIGINT UNIQUE NOT NULL,
-    guessing_enabled BOOLEAN DEFAULT true,
-    allow_leaks BOOLEAN DEFAULT false
+    guessing_enabled BOOLEAN DEFAULT true
 );
 
-ALTER TABLE guilds ADD COLUMN IF NOT EXISTS allow_leaks BOOLEAN DEFAULT false;
+-- channels where leaked content is shown; leaks are blocked everywhere else
+CREATE TABLE IF NOT EXISTS leak_channels (
+    id SERIAL PRIMARY KEY,
+    guild_id BIGINT NOT NULL,
+    channel_id BIGINT UNIQUE NOT NULL
+);
+
+-- the old per-guild allow_leaks boolean is replaced by the per-channel whitelist above;
+-- drop it so any existing value is erased (everyone starts with no leak channels)
+ALTER TABLE guilds DROP COLUMN IF EXISTS allow_leaks;
 
 CREATE TABLE IF NOT EXISTS oauth_tokens (
     discord_id BIGINT PRIMARY KEY,
@@ -49,7 +57,9 @@ async def main() -> None:
     )
     try:
         await conn.execute(SCHEMA)
-        print("[database_setup] schema created (users, guilds, oauth_tokens)")
+        print(
+            "[database_setup] schema created (users, guilds, leak_channels, oauth_tokens)"
+        )
     finally:
         await conn.close()
 

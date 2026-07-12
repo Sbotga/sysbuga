@@ -328,20 +328,36 @@ class UserData:
             )
             return result["guessing_enabled"] if result else True
 
-    async def set_allow_leaks(self, guild_id: int, allowed: bool) -> bool:
-        await self.verify_discord_guild(guild_id)
+    async def channel_leaks_allowed(self, channel_id: int) -> bool:
+        """whether leaked content may be shown in this channel (it's on the whitelist)"""
+        if not channel_id:
+            return False
         async with self.db.acquire() as conn:
-            result = await conn.fetchrow(
-                "UPDATE guilds SET allow_leaks = $1 WHERE guild_id = $2 RETURNING allow_leaks",
-                allowed,
-                guild_id,
+            row = await conn.fetchrow(
+                "SELECT 1 FROM leak_channels WHERE channel_id = $1", channel_id
             )
-            return result["allow_leaks"] if result else False
+            return row is not None
 
-    async def allow_leaks(self, guild_id: int) -> bool:
+    async def add_leak_channel(self, guild_id: int, channel_id: int) -> None:
         await self.verify_discord_guild(guild_id)
         async with self.db.acquire() as conn:
-            result = await conn.fetchrow(
-                "SELECT allow_leaks FROM guilds WHERE guild_id = $1", guild_id
+            await conn.execute(
+                "INSERT INTO leak_channels (guild_id, channel_id) VALUES ($1, $2) "
+                "ON CONFLICT (channel_id) DO NOTHING",
+                guild_id,
+                channel_id,
             )
-            return result["allow_leaks"] if result else False
+
+    async def remove_leak_channel(self, channel_id: int) -> bool:
+        async with self.db.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM leak_channels WHERE channel_id = $1", channel_id
+            )
+            return result.endswith("1")  # "DELETE 1" when a row was removed
+
+    async def leak_channels(self, guild_id: int) -> list[int]:
+        async with self.db.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT channel_id FROM leak_channels WHERE guild_id = $1", guild_id
+            )
+            return [r["channel_id"] for r in rows]
