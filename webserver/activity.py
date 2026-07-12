@@ -34,6 +34,7 @@ from cogs.guessing import (
     _fetch_bytes,
     _giveup_seconds,
     _guess_points,
+    _hint_points,
     _hints_taken,
     _masked_name,
     _over_guess_limit,
@@ -551,6 +552,7 @@ async def start_round(
         "has_reveal": meta["has_reveal"],
         "expires_at": expires_at,
         "giveup_at": now + _giveup_seconds(body.mode),
+        "points": _guess_points(body.mode, 0),  # starting worth (None if not ranked)
     }
     if "stage" in meta:  # staged modes (music, event)
         resp["stage"] = meta["stage"]
@@ -675,13 +677,18 @@ async def _tiered_hint(
         await redis_state.update_round(round_id, meta)
         if user_data:
             await user_data.add_guesses(user_id, meta["mode"], "hint")
-    return {
+    resp = {
         "stage": stage,
         "max_stage": MAX_TEXT_HINTS,
         "lines": lines,
         "image": image,
         "advanced": advanced,
     }
+    if advanced:
+        hp = _hint_points(meta["mode"], stage)
+        if hp:
+            resp["points_deduction"], resp["points_now"] = hp
+    return resp
 
 
 async def _music_hint(
@@ -720,6 +727,9 @@ async def _music_hint(
     }
     if stage >= song_clip.MAX_STAGE and meta.get("cover_type"):
         resp["cover_type"] = meta["cover_type"]  # final hint reveals the cover type
+    hp = _hint_points(meta["mode"], stage - 1)
+    if hp:
+        resp["points_deduction"], resp["points_now"] = hp
     return resp
 
 
@@ -752,12 +762,16 @@ async def _story_hint(
     if user_data:
         await user_data.add_guesses(user_id, meta["mode"], "hint")
     # stage 3 adds the event type, stage 4 the attribute and unit, stage 5 the description
-    return {
+    resp = {
         "stage": stage,
         "max_stage": event_story.MAX_STAGE,
         "dialogue": _story_prompt(lines, stage, etype, attr, unit, desc),
         "done": stage >= event_story.MAX_STAGE,
     }
+    hp = _hint_points(meta["mode"], stage - 1)
+    if hp:
+        resp["points_deduction"], resp["points_now"] = hp
+    return resp
 
 
 @router.post("/guess/reveal")

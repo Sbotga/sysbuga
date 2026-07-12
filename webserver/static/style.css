@@ -163,6 +163,8 @@ select:disabled, input:disabled, button:disabled { opacity: 0.5; cursor: not-all
 .timer { font-variant-numeric: tabular-nums; font-weight: 800; font-size: 1.2rem; color: var(--muted); }
 .timer.low { color: #f23f43; }
 .timer[hidden] { display: none; }
+.points { font-weight: 700; font-size: 0.9rem; color: #e0a516; margin: 2px 0; }
+.points[hidden] { display: none; }
 .prompt { font-size: 1.02rem; min-height: 1em; }
 
 .round-image-wrap { width: 100%; display: flex; justify-content: center; }

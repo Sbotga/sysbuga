@@ -267,6 +267,23 @@ function setResult(text, cls) {
   el.className = cls || "";
 }
 
+// current leaderboard worth of the round; null/undefined for non-ranked modes hides it
+function setPoints(worth) {
+  const el = $("round-points");
+  if (worth == null) {
+    el.hidden = true;
+  } else {
+    el.textContent = `Worth ${worth.toLocaleString()} pts (fewer per hint)`;
+    el.hidden = false;
+  }
+}
+
+// the "(-X pts, now Y)" suffix a hint adds to its log line for ranked modes
+function pointsSuffix(res) {
+  if (res.points_now === undefined) return "";
+  return ` (-${res.points_deduction.toLocaleString()} pts, now ${res.points_now.toLocaleString()})`;
+}
+
 function setFormEnabled(on) {
   $("guess-input").disabled = !on;
   $("guess-submit").disabled = !on;
@@ -376,6 +393,7 @@ async function startRound(mode) {
   disarmGiveup();
   clearRoundMedia("round-image", "round-video");
   $("round-timer").hidden = true; // no timer while loading
+  setPoints(null);
   $("round-prompt").textContent = "Loading…";
   $("guess-input").value = "";
   setFormEnabled(false); // guess bar disabled while loading
@@ -400,6 +418,7 @@ async function startRound(mode) {
   currentRound = round;
   $("round-prompt").textContent = round.prompt || "";
   $("round-prompt").style.whiteSpace = "pre-wrap"; // event-story dialogue is multi-line
+  setPoints(round.points); // starting worth for ranked modes (hidden otherwise)
   if (round.has_image) {
     setRoundMedia("round-image", "round-video", round);
   }
@@ -428,6 +447,7 @@ function showReveal(round, message, cls) {
   stopTimer();
   currentRound = null;
   $("round-timer").hidden = true;
+  setPoints(null);
   setResult(message, cls);
   $("guess-form").hidden = true;
   $("btn-giveup").hidden = true;
@@ -474,10 +494,16 @@ async function submitGuess(event) {
     // show what they typed and what it resolved to when that differs like an alias
     const text = guess === result.answer ? guess : `${guess} → ${result.answer}`;
     playerLog("✅", text, "right");
-    const msg =
+    let msg =
       result.time != null
         ? `Correct in ${result.time.toFixed(2)}s! It was ${result.answer}.`
         : `Correct! It was ${result.answer}.`;
+    if (result.points != null) {
+      msg +=
+        result.points > 0
+          ? ` +${result.points.toLocaleString()} points!`
+          : " (no points - guess limit reached)";
+    }
     showReveal({ ...currentRound, ...result }, msg, "good");
   } else if (result.result === "expired") {
     showReveal({ ...currentRound, ...result }, `Time's up! It was ${result.answer}.`, "bad");
@@ -545,7 +571,8 @@ async function useHint() {
       $("round-prompt").textContent = res.dialogue;
       if (!res.already) {
         if (currentRound) currentRound.stage = res.stage;
-        playerLog("💡", `More dialogue revealed (${res.stage}/${res.max_stage})`, "hint");
+        if (res.points_now !== undefined) setPoints(res.points_now);
+        playerLog("💡", `More dialogue revealed (${res.stage}/${res.max_stage})${pointsSuffix(res)}`, "hint");
         refreshGiveup();
       }
     } else if (res.lines !== undefined) {
@@ -553,7 +580,8 @@ async function useHint() {
       if (!res.advanced) {
         setResult("All hints have been revealed.", "");
       } else {
-        playerLog("💡", res.lines[res.stage - 1] || "", "hint");
+        if (res.points_now !== undefined) setPoints(res.points_now);
+        playerLog("💡", (res.lines[res.stage - 1] || "") + pointsSuffix(res), "hint");
         if (res.image && res.stage === 1) playerLogImage(res.image);
         if (currentRound) currentRound.hints_used = res.stage;
         refreshGiveup();
@@ -569,6 +597,8 @@ async function useHint() {
         audio.play().catch(() => {});
         let text = `Stage ${res.stage}/${res.max_stage} - ${res.seconds}s of the song`;
         if (res.cover_type) text += `\nCover type: ${res.cover_type}`;
+        if (res.points_now !== undefined) setPoints(res.points_now);
+        text += pointsSuffix(res);
         playerLog("💡", text, "hint");
         if (currentRound) currentRound.stage = res.stage;
         refreshGiveup();

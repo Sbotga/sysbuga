@@ -117,6 +117,33 @@ def _guess_points(mode: str, hints: int) -> "int | None":
     return cfg["start"] - sum(cfg["deductions"][:used])
 
 
+def _start_points_line(mode: str) -> str:
+    """shown when a ranked round starts, or '' for a non-ranked mode"""
+    cfg = GUESS_POINTS.get(mode)
+    if not cfg:
+        return ""
+    return f"-# Worth **`{cfg['start']:,}`** leaderboard points (fewer per hint used)."
+
+
+def _hint_points(mode: str, hints_taken: int) -> "tuple[int, int] | None":
+    """(points deducted by this hint, new worth) for a ranked mode, or None otherwise"""
+    cfg = GUESS_POINTS.get(mode)
+    if not cfg or not 1 <= hints_taken <= len(cfg["deductions"]):
+        return None
+    deduction = cfg["deductions"][hints_taken - 1]
+    worth = cfg["start"] - sum(cfg["deductions"][:hints_taken])
+    return deduction, worth
+
+
+def _hint_points_line(mode: str, hints_taken: int) -> str:
+    """shown when a ranked round's hint fires: the deduction and new worth, or '' otherwise"""
+    hp = _hint_points(mode, hints_taken)
+    if hp is None:
+        return ""
+    deduction, worth = hp
+    return f"-# **`-{deduction:,}`** points - a correct guess is now worth **`{worth:,}`**."
+
+
 def _prizes_enabled() -> bool:
     """prizes (and their button/DMs/claims) only exist when a prizes channel is configured"""
     return bool(get_config()["discord"].get("prizes_channel_id"))
@@ -946,6 +973,9 @@ class GuessCog(commands.Cog):
                     f"-# You can give up in `{int(_giveup_seconds(mode))}` seconds "
                     "(after using a hint).\n" + embed.description
                 )
+            start_line = _start_points_line(mode)  # only ranked modes
+            if start_line:
+                embed.description = (embed.description or "") + "\n" + start_line
             if is_chart:
                 await interaction.edit_original_response(
                     embed=embed, attachments=[file] if file else []
@@ -1464,6 +1494,9 @@ class GuessCog(commands.Cog):
         desc = f"Here's {int(song_clip.STAGE_SECONDS[stage])} seconds of the song."
         if stage >= song_clip.MAX_STAGE and d.get("cover_type"):
             desc += f"\nCover type: **{d['cover_type']}**"
+        points_line = _hint_points_line(data["guessing"], stage - 1)
+        if points_line:
+            desc += f"\n\n{points_line}"
         embed = embeds.embed(
             title=f"Guess Hint - Stage {stage}/{song_clip.MAX_STAGE}",
             description=desc,
@@ -1510,6 +1543,10 @@ class GuessCog(commands.Cog):
             snippet += f"\n{attr_line}\n{unit_line}"
         if stage >= event_story.DESC_STAGE:  # the last hint adds the description
             snippet += f"\n\n**Description:** {desc}"
+        if advanced:
+            points_line = _hint_points_line(data["guessing"], stage - 1)
+            if points_line:
+                snippet += f"\n\n{points_line}"
         embed = embeds.embed(
             title=f"Guess Hint - Stage {stage}/{event_story.MAX_STAGE}",
             description=snippet,
@@ -1613,6 +1650,10 @@ class GuessCog(commands.Cog):
         lines, files = await self._tier_lines(data, stage)
         if not advanced:
             lines.append("-# All hints have been revealed.")
+        if advanced:
+            points_line = _hint_points_line(data["guessing"], stage)
+            if points_line:
+                lines.append(points_line)
         embed = embeds.embed(
             title=f"Guess Hint - Stage {stage}/{MAX_TEXT_HINTS}",
             description="\n".join(lines),
