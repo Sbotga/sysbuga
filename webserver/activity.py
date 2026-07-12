@@ -33,13 +33,16 @@ from cogs.guessing import (
     SONG_REVEAL_FRACTION,
     _fetch_bytes,
     _giveup_seconds,
+    _guess_points,
+    _hints_taken,
     _masked_name,
+    _over_guess_limit,
 )
 from helpers.imaging import _crop_chart, _crop_square
 from data.pjsk import RARITY_DISPLAY, character_display_name
 from data.search import preprocess
 from data.song_equivalents import songs_equivalent
-from helpers import converters, unblock
+from helpers import converters, periods, unblock
 from services import chart_cache, chart_clip, chart_preview, event_story, song_clip
 from webserver import redis_state, spectate
 
@@ -799,6 +802,27 @@ async def reveal_answer(
     return {"answer": meta["answer_name"], "has_reveal": meta["has_reveal"]}
 
 
+async def _award_points(
+    user_data: "UserData",
+    user_id: int,
+    meta: dict[str, Any],
+    hour_count: int,
+    day_count: int,
+) -> "int | None":
+    """award leaderboard points for a correct activity guess, respecting opt-out and guess caps"""
+    points = _guess_points(meta["mode"], _hints_taken(meta["mode"], meta))
+    if points is None:
+        return None
+    if await user_data.get_settings(user_id, "opt_out_rolling_guess_leaderboards"):
+        return None
+    if _over_guess_limit(meta.get("attempts", 0), hour_count, day_count):
+        return 0  # too many guesses this round/hour/day - no points
+    await user_data.add_guess_points(
+        user_id, meta["mode"], points, periods.week_index(), periods.month_index()
+    )
+    return points
+
+
 @router.post("/guess/submit")
 async def submit_guess(
     request: Request,
@@ -820,6 +844,13 @@ async def submit_guess(
             "has_reveal": meta["has_reveal"],
         }
 
+    # count this attempt toward the round cap and this user's rate limits, then persist
+    meta["attempts"] = meta.get("attempts", 0) + 1
+    hour_count = day_count = 0
+    if user_data:
+        hour_count, day_count = await user_data.record_guess_attempt(user_id)
+    await redis_state.update_round(body.round_id, meta)
+
     matched = _match(_pjsk(state), meta, body.guess)
     if matched is None:
         return {"result": "not_found"}
@@ -834,13 +865,19 @@ async def submit_guess(
     )
     if correct:
         await redis_state.finish_round(body.round_id, user_id)
+        points = None
         if user_data:
             await user_data.add_guesses(user_id, meta["mode"], "success")
+            points = await _award_points(
+                user_data, user_id, meta, hour_count, day_count
+            )
         resp = {
             "result": "correct",
             "answer": meta["answer_name"],
             "has_reveal": meta["has_reveal"],
         }
+        if points is not None:
+            resp["points"] = points
         started = meta.get("started_at")
         if started is not None:
             resp["time"] = round(time.time() - started, 2)

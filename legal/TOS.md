@@ -1,7 +1,7 @@
 # Terms of Service
 
-**Last Updated:** 2025/07/08 9:13 PM EST  
-**Effective Date:** 2025/07/08 9:13 PM EST
+**Last Updated:** 2026/07/12  
+**Effective Date:** 2026/07/12
 
 By using **SYSbuga** or any of its associated services, you agree to abide by these Terms of Service. If you do not agree with any part of these terms, please do not use the service.
 
@@ -71,6 +71,19 @@ The service may contain links to third-party websites or services that are not c
 ## 10. **Limitation of Liability**
 
 We will not be held liable for any damages, losses, or issues that occur while using the service, including but not limited to any inaccuracies in results, or damage to your Project Sekai account.
+
+---
+
+## 11. **Leaderboard Prizes**
+
+SYSbuga may run weekly and monthly guessing leaderboards that award in-game *Project Sekai* prizes, such as crystals, to top-ranking users. Participation in these leaderboards and the acceptance of any prize are subject to the following:
+
+- **Eligibility and claiming.** Prizes may only be claimed on the official global HATSUNE MIKU: COLORFUL STAGE game server, and must be claimed within the stated claim window (currently 3 days from when the prize is awarded), though we may extend claim windows at our discretion. Unclaimed prizes expire and are forfeited. When claiming, you are responsible for providing the correct *Project Sekai* **EN** account ID. We are not responsible for prizes sent to an incorrect or mistyped account.
+- **Delivery.** Prizes are granted manually at our discretion and are not sent automatically. We do not guarantee any specific delivery time.
+- **Forfeiture and denial.** We reserve the right to withhold, deny, revoke, reduce, or forfeit any prize at any time, with or without notice, and for any reason at our sole discretion. This includes (without limitation) suspected cheating, botting, exploiting, multi-accounting, any violation of these terms, or any conduct we consider abusive or unfair. A forfeited or denied prize is void and is not transferred to any other user.
+- **No cash value.** Prizes have no monetary value and may be changed, limited, or discontinued at any time. You may not sell, trade, or exchange a prize for money or any other form of compensation. You may, however, gift a prize to another user for free (for example, by having it sent to their account).
+
+By claiming a prize, you agree to these terms.
 
 ---
 

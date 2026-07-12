@@ -7,6 +7,7 @@ discord:
   support_invite: ""
   support_id: 0                   # support server guild id
   alias_manager_role_ids: []      # roles that can manage aliases
+  prizes_channel_id: 0            # leaderboard prize-claim private channel; 0 disables prizes entirely
   # legal links shown in /help; blank = the line is omitted
   tos_url: ""
   privacy_url: ""

@@ -9,6 +9,7 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "default_region": "en",
     "mirror_charts_by_default": False,
     "default_difficulty": "master",
+    "opt_out_rolling_guess_leaderboards": False,
     # activity-only (not surfaced in /user settings; set from the activity UI)
     "activity_theme": "dark",
 }
@@ -265,6 +266,284 @@ class UserData:
             """,
             guess_type,
             rank - 1,
+        )
+
+    # --- leaderboard points (weekly/monthly) ---
+
+    async def add_guess_points(
+        self, user_id: int, mode: str, points: int, week_index: int, month_index: int
+    ) -> None:
+        """add points to both the current weekly and monthly board for one mode"""
+        await self.verify_discord_user(user_id)
+        async with self.db.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO guess_points (discord_id, period_type, period_index, mode, points)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (discord_id, period_type, period_index, mode)
+                DO UPDATE SET points = guess_points.points + EXCLUDED.points
+                """,
+                [
+                    (user_id, "weekly", week_index, mode, points),
+                    (user_id, "monthly", month_index, mode, points),
+                ],
+            )
+
+    async def clear_period_points(
+        self, user_id: int, week_index: int, month_index: int
+    ) -> None:
+        """drop a user's points for the current week and month (used when they opt out)"""
+        await self.db.execute(
+            """
+            DELETE FROM guess_points
+            WHERE discord_id = $1
+              AND ((period_type = 'weekly' AND period_index = $2)
+                OR (period_type = 'monthly' AND period_index = $3))
+            """,
+            user_id,
+            week_index,
+            month_index,
+        )
+
+    async def get_points_leaderboard(
+        self, period_type: str, period_index: int, page: int, user_id: int
+    ):
+        """one page of the combined (summed across modes) board plus the caller's rank/total"""
+        per_page = GUESS_LEADERBOARD_PER_PAGE
+        total_people = await self.db.fetchval(
+            "SELECT COUNT(DISTINCT discord_id) FROM guess_points "
+            "WHERE period_type = $1 AND period_index = $2",
+            period_type,
+            period_index,
+        )
+        total_pages = max(1, (total_people + per_page - 1) // per_page)
+        if page > total_pages:
+            page = total_pages
+        rows = await self.db.fetch(
+            """
+            SELECT discord_id, SUM(points) AS total
+            FROM guess_points
+            WHERE period_type = $1 AND period_index = $2
+            GROUP BY discord_id
+            ORDER BY total DESC, discord_id ASC
+            LIMIT $3 OFFSET $4
+            """,
+            period_type,
+            period_index,
+            per_page,
+            (page - 1) * per_page,
+        )
+        rank_row = await self.db.fetchrow(
+            """
+            WITH totals AS (
+                SELECT discord_id, SUM(points) AS total,
+                    ROW_NUMBER() OVER (ORDER BY SUM(points) DESC, discord_id ASC) AS rank
+                FROM guess_points
+                WHERE period_type = $1 AND period_index = $2
+                GROUP BY discord_id
+            )
+            SELECT rank, total FROM totals WHERE discord_id = $3
+            """,
+            period_type,
+            period_index,
+            user_id,
+        )
+        return rows, rank_row, total_pages
+
+    async def get_points_breakdown(
+        self, user_id: int, period_type: str, period_index: int
+    ) -> dict[str, int]:
+        """a user's points per mode for one period"""
+        rows = await self.db.fetch(
+            "SELECT mode, points FROM guess_points "
+            "WHERE discord_id = $1 AND period_type = $2 AND period_index = $3",
+            user_id,
+            period_type,
+            period_index,
+        )
+        return {r["mode"]: r["points"] for r in rows}
+
+    async def get_points_top(
+        self, period_type: str, period_index: int, limit: int
+    ) -> list[dict]:
+        """the top N of a period's combined board (for prize ranking)"""
+        rows = await self.db.fetch(
+            """
+            SELECT discord_id, SUM(points) AS total
+            FROM guess_points
+            WHERE period_type = $1 AND period_index = $2
+            GROUP BY discord_id
+            ORDER BY total DESC, discord_id ASC
+            LIMIT $3
+            """,
+            period_type,
+            period_index,
+            limit,
+        )
+        return [dict(r) for r in rows]
+
+    async def record_guess_attempt(self, user_id: int) -> tuple[int, int]:
+        """count one guess attempt toward this user's hourly and daily buckets (fixed UTC hours/
+        days), returning the new (hour_count, day_count). shared by the bot and activity
+        """
+        now = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+        hour_key, day_key = now // 3600, now // 86400
+        row = await self.db.fetchrow(
+            """
+            INSERT INTO guess_rate (discord_id, hour_key, hour_count, day_key, day_count)
+            VALUES ($1, $2, 1, $3, 1)
+            ON CONFLICT (discord_id) DO UPDATE SET
+                hour_count = CASE WHEN guess_rate.hour_key = $2
+                    THEN guess_rate.hour_count + 1 ELSE 1 END,
+                hour_key = $2,
+                day_count = CASE WHEN guess_rate.day_key = $3
+                    THEN guess_rate.day_count + 1 ELSE 1 END,
+                day_key = $3
+            RETURNING hour_count, day_count
+            """,
+            user_id,
+            hour_key,
+            day_key,
+        )
+        return row["hour_count"], row["day_count"]
+
+    # --- prizes ---
+
+    async def last_finalized_index(self, period_type: str) -> int:
+        """the highest period index whose prizes have already been awarded (0 if none)"""
+        return (
+            await self.db.fetchval(
+                "SELECT COALESCE(MAX(period_index), 0) FROM leaderboard_runs "
+                "WHERE period_type = $1",
+                period_type,
+            )
+            or 0
+        )
+
+    async def finalize_period(
+        self,
+        period_type: str,
+        period_index: int,
+        winners: list[tuple[int, int, int, int]],
+        expires_at: "datetime.datetime",
+    ) -> list[dict]:
+        """award a finished period's prizes once and mark it finalized. winners are
+        (discord_id, rank, paid_crystals, free_crystals). returns the created prize rows
+        """
+        created: list[dict] = []
+        async with self.db.acquire() as conn:
+            async with conn.transaction():
+                for discord_id, rank, paid, free in winners:
+                    row = await conn.fetchrow(
+                        """
+                        INSERT INTO prizes (discord_id, period_type, period_index, rank,
+                            paid_crystals, free_crystals, expires_at)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        ON CONFLICT (discord_id, period_type, period_index) DO NOTHING
+                        RETURNING *
+                        """,
+                        discord_id,
+                        period_type,
+                        period_index,
+                        rank,
+                        paid,
+                        free,
+                        expires_at,
+                    )
+                    if row:
+                        created.append(dict(row))
+                await conn.execute(
+                    "INSERT INTO leaderboard_runs (period_type, period_index) VALUES ($1, $2) "
+                    "ON CONFLICT DO NOTHING",
+                    period_type,
+                    period_index,
+                )
+        return created
+
+    async def get_claimable_prizes(self, user_id: int) -> list[dict]:
+        """unclaimed prizes that haven't expired, oldest first"""
+        rows = await self.db.fetch(
+            "SELECT * FROM prizes WHERE discord_id = $1 AND status = 'unclaimed' "
+            "AND expires_at > now() ORDER BY period_type, period_index",
+            user_id,
+        )
+        return [dict(r) for r in rows]
+
+    async def get_pending_prizes(self, user_id: int) -> list[dict]:
+        """prizes the user has claimed and are awaiting a manual grant"""
+        rows = await self.db.fetch(
+            "SELECT * FROM prizes WHERE discord_id = $1 AND status = 'pending' "
+            "ORDER BY period_type, period_index",
+            user_id,
+        )
+        return [dict(r) for r in rows]
+
+    async def has_claimable_prizes(self, user_id: int) -> bool:
+        return bool(
+            await self.db.fetchval(
+                "SELECT 1 FROM prizes WHERE discord_id = $1 AND status = 'unclaimed' "
+                "AND expires_at > now() LIMIT 1",
+                user_id,
+            )
+        )
+
+    async def get_prize(self, prize_id: int) -> "dict | None":
+        row = await self.db.fetchrow("SELECT * FROM prizes WHERE id = $1", prize_id)
+        return dict(row) if row else None
+
+    async def claim_prize(self, prize_id: int, user_id: int, pjsk_id: int) -> bool:
+        """mark an unclaimed, unexpired prize as pending (claimed). False if it wasn't claimable"""
+        result = await self.db.execute(
+            "UPDATE prizes SET status = 'pending', pjsk_id = $3, claimed_at = now() "
+            "WHERE id = $1 AND discord_id = $2 AND status = 'unclaimed' AND expires_at > now()",
+            prize_id,
+            user_id,
+            pjsk_id,
+        )
+        return result.split()[-1] == "1"
+
+    async def forfeit_prize(self, prize_id: int, user_id: int) -> bool:
+        """forfeit an unclaimed prize (gone for good). False if it wasn't forfeitable"""
+        result = await self.db.execute(
+            "UPDATE prizes SET status = 'forfeited' "
+            "WHERE id = $1 AND discord_id = $2 AND status = 'unclaimed'",
+            prize_id,
+            user_id,
+        )
+        return result.split()[-1] == "1"
+
+    async def get_all_prizes(self, user_id: int) -> list[dict]:
+        """every prize the user has ever had, newest first (the /guess prize history/log)"""
+        rows = await self.db.fetch(
+            "SELECT * FROM prizes WHERE discord_id = $1 ORDER BY created_at DESC",
+            user_id,
+        )
+        return [dict(r) for r in rows]
+
+    async def complete_prize(self, prize_id: int) -> bool:
+        """mark a pending prize granted (admin pressed Sent). False if it wasn't pending"""
+        result = await self.db.execute(
+            "UPDATE prizes SET status = 'complete' WHERE id = $1 AND status = 'pending'",
+            prize_id,
+        )
+        return result.split()[-1] == "1"
+
+    async def deny_prize(self, prize_id: int, reason: str) -> bool:
+        """mark a pending prize denied with a reason. False if it wasn't pending"""
+        result = await self.db.execute(
+            "UPDATE prizes SET status = 'denied', deny_reason = $2 "
+            "WHERE id = $1 AND status = 'pending'",
+            prize_id,
+            reason,
+        )
+        return result.split()[-1] == "1"
+
+    async def unclaim_prize(self, prize_id: int) -> None:
+        """revert a pending prize to unclaimed (used when the claim notification fails to send)"""
+        await self.db.execute(
+            "UPDATE prizes SET status = 'unclaimed', pjsk_id = NULL, claimed_at = NULL "
+            "WHERE id = $1 AND status = 'pending'",
+            prize_id,
         )
 
     async def store_oauth_token(

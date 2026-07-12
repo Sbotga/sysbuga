@@ -14,6 +14,7 @@ FIELDS = (
     "clear",
     "none",
     "mikuleek",
+    "crystal",
 )
 
 
@@ -30,6 +31,7 @@ class Emojis:
         self.none = "normal_fail"
 
         self.mikuleek = "mikuleek"  # resolves to the mention once uploaded
+        self.crystal = "crystal"  # leaderboard prize currency; image uploaded later
 
         self.difficulty_colors = {
             "easy": "easy_color",

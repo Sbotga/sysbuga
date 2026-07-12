@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import io
 import math
 import random
@@ -15,8 +16,9 @@ from discord.ext import commands, tasks
 from data.pjsk import RARITY_DISPLAY, character_display_name
 from data.song_equivalents import equivalents_of, songs_equivalent
 from database.queries import GUESS_LEADERBOARD_PER_PAGE
-from helpers import converters, embeds, tools, unblock
+from helpers import converters, embeds, periods, tools, unblock
 from helpers.autocompletes import autocompletes
+from helpers.config_loader import get_config
 from helpers.emojis import emojis
 from helpers.imaging import _crop_chart, _crop_square
 from helpers.views import SbugaView
@@ -60,6 +62,100 @@ EVENT_DESC_FRACTION = 1 / 3
 
 # songs that don't work as a /guess music round; still fine for chart and jacket guessing
 MUSIC_GUESS_EXCLUDED = {674, 675, 676}
+
+# leaderboard-eligible modes: a correct guess is worth `start` points, reduced by each pooled hint
+# the round has revealed. every mode bottoms out at 250 once all its hints are shown
+GUESS_POINTS: dict[str, dict[str, Any]] = {
+    "chart": {"start": 5000, "deductions": (1500, 500, 2750)},
+    "jacket": {"start": 2000, "deductions": (500, 250, 1000)},
+    "music": {"start": 3000, "deductions": (750, 1000, 1000)},
+    "event": {"start": 7000, "deductions": (1000, 1500, 2000, 2250)},
+}
+# prize per placement -> (paid crystals, free crystals); only listed ranks win
+WEEKLY_PRIZES: dict[int, tuple[int, int]] = {1: (350, 20), 2: (110, 5), 3: (50, 0)}
+MONTHLY_PRIZES: dict[int, tuple[int, int]] = {
+    1: (1800, 90),
+    2: (950, 50),
+    3: (350, 20),
+    4: (110, 5),
+    **{r: (50, 0) for r in range(5, 11)},
+}
+# a top finish this deep is DM'd that they placed
+WEEKLY_DM_TOP = 3
+MONTHLY_DM_TOP = 10
+
+# guess-attempt caps beyond which a correct guess earns 0 points. the per-round cap is shared by
+# everyone guessing that round; the hourly/daily caps are per user, spanning the bot and activity
+ROUND_GUESS_LIMIT = 20
+HOURLY_GUESS_LIMIT = 500
+DAILY_GUESS_LIMIT = 6000
+
+
+def _over_guess_limit(attempts: int, hour_count: int, day_count: int) -> bool:
+    """True when this guess is past the round cap or the user's hourly/daily cap (so 0 points)"""
+    return (
+        attempts > ROUND_GUESS_LIMIT
+        or hour_count > HOURLY_GUESS_LIMIT
+        or day_count > DAILY_GUESS_LIMIT
+    )
+
+
+def _hints_taken(mode: str, d: dict) -> int:
+    """how many hints the round has revealed - music/event count a stage from 1, the tiered modes
+    count hint stages from 0"""
+    if mode in ("music", "event"):
+        return max(0, d.get("stage", 1) - 1)
+    return d.get("hint_stage", 0)
+
+
+def _guess_points(mode: str, hints: int) -> "int | None":
+    """points a correct guess is worth after `hints` hints, or None when the mode isn't ranked"""
+    cfg = GUESS_POINTS.get(mode)
+    if not cfg:
+        return None
+    used = min(hints, len(cfg["deductions"]))
+    return cfg["start"] - sum(cfg["deductions"][:used])
+
+
+def _prizes_enabled() -> bool:
+    """prizes (and their button/DMs/claims) only exist when a prizes channel is configured"""
+    return bool(get_config()["discord"].get("prizes_channel_id"))
+
+
+# how long a winner has to claim before the prize expires
+PRIZE_CLAIM_DAYS = 3
+
+
+def _prize_label(prize: dict) -> str:
+    """the period a prize is for, e.g. 'Week 3' or 'Month 1'"""
+    kind = "Week" if prize["period_type"] == "weekly" else "Month"
+    return f"{kind} {prize['period_index']}"
+
+
+def _prize_reward(prize: dict) -> str:
+    """the crystal reward line, e.g. '{crystal} 350 paid + 20 free crystals'"""
+    parts = [f"{prize['paid_crystals']:,} paid"]
+    if prize["free_crystals"]:
+        parts.append(f"{prize['free_crystals']:,} free")
+    return f"{emojis.crystal} {' + '.join(parts)} crystals"
+
+
+def _prize_status_line(prize: dict) -> str:
+    """the status shown in the /guess prize history"""
+    status = prize["status"]
+    if status == "unclaimed":
+        if prize["expires_at"] <= datetime.datetime.now(datetime.timezone.utc):
+            return "⏳ Expired (unclaimed)"
+        return f"🎁 Unclaimed - expires <t:{int(prize['expires_at'].timestamp())}:R>"
+    if status == "pending":
+        return "🕓 Claimed - awaiting manual grant"
+    if status == "complete":
+        return "✅ Sent"
+    if status == "denied":
+        return f"❌ Denied: {prize.get('deny_reason') or 'no reason given'}"
+    if status == "forfeited":
+        return "🚫 Forfeited"
+    return status
 
 
 def _masked_name(name: str, fraction: float) -> str:
@@ -146,6 +242,7 @@ class GuessCog(commands.Cog):
         self.bot.cache.guess_channels = {}
         chart_clip.cleanup_stale()
         self.check_guess_task.start()
+        self.finalize_prizes_task.start()
 
     async def cog_load(self) -> None:
         # warm the render server then keep the clip cache topped up in the background
@@ -159,6 +256,7 @@ class GuessCog(commands.Cog):
 
     async def cog_unload(self) -> None:
         self.check_guess_task.cancel()
+        self.finalize_prizes_task.cancel()
         await chart_cache.stop()
         await chart_preview.stop()
 
@@ -544,6 +642,59 @@ class GuessCog(commands.Cog):
     async def _before(self) -> None:
         await self.bot.wait_until_ready()
 
+    # --- prize finalization (award + DM winners once a period ends) ---
+
+    @tasks.loop(minutes=20)
+    async def finalize_prizes_task(self) -> None:
+        if not _prizes_enabled():
+            return
+        for period_type, current in (
+            ("weekly", periods.week_index()),
+            ("monthly", periods.month_index()),
+        ):
+            last = await self.bot.user_data.last_finalized_index(period_type)  # type: ignore[union-attr]
+            # award every ended-but-unfinalized period (index >= 1 skips the pre-launch bucket)
+            for index in range(max(1, last + 1), current):
+                await self._finalize_period(period_type, index)
+
+    @finalize_prizes_task.before_loop
+    async def _before_finalize(self) -> None:
+        await self.bot.wait_until_ready()
+
+    async def _finalize_period(self, period_type: str, index: int) -> None:
+        prize_map = WEEKLY_PRIZES if period_type == "weekly" else MONTHLY_PRIZES
+        top = await self.bot.user_data.get_points_top(period_type, index, max(prize_map))  # type: ignore[union-attr]
+        winners = [
+            (row["discord_id"], rank, *prize_map[rank])
+            for rank, row in enumerate(top, start=1)
+            if rank in prize_map
+        ]
+        expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+            days=PRIZE_CLAIM_DAYS
+        )
+        created = await self.bot.user_data.finalize_period(period_type, index, winners, expires_at)  # type: ignore[union-attr]
+        for prize in created:
+            await self._dm_prize(prize)
+
+    async def _dm_prize(self, prize: dict) -> None:
+        try:
+            user = self.bot.get_user(prize["discord_id"]) or await self.bot.fetch_user(
+                prize["discord_id"]
+            )
+        except discord.HTTPException:
+            return
+        embed = embeds.embed(title="🏆 You Won a Prize!", color=discord.Color.gold())
+        embed.description = (
+            f"You ranked **#{prize['rank']}** on **{_prize_label(prize)}**'s guessing "
+            f"leaderboard!\n\n**Prize:** {_prize_reward(prize)}\n\n"
+            f"Claim it on the **Global PJSK server** within **{PRIZE_CLAIM_DAYS} days** "
+            f"(expires <t:{int(prize['expires_at'].timestamp())}:R>) - run `/guess prize` there."
+        )
+        try:
+            await user.send(embed=embed, view=_PrizeClaimView(self, [prize]))
+        except discord.HTTPException:
+            pass  # DMs closed; still claimable via /guess prize
+
     # --- guess checking ---
 
     @commands.Cog.listener()
@@ -574,12 +725,32 @@ class GuessCog(commands.Cog):
 
         # a real guess attempt so record the guesser and let them -end
         data.setdefault("guessers", set()).add(message.author.id)
+        # count this attempt toward the round's shared cap and this user's rate limits
+        data["data"]["attempts"] = data["data"].get("attempts", 0) + 1
+        data["_rate"] = await self.bot.user_data.record_guess_attempt(message.author.id)  # type: ignore[union-attr]
         if data["guessType"] == "song":
             await self._check_song(message, data, content)
         elif data["guessType"] == "character":
             await self._check_character(message, data, content)
         elif data["guessType"] == "event":
             await self._check_event(message, data, content)
+
+    async def _award_points(self, user_id: int, data: dict) -> "int | None":
+        """award leaderboard points for a correct guess, respecting opt-out. returns the points
+        earned, or None when the mode isn't ranked or the user opted out"""
+        mode = data["guessing"]
+        points = _guess_points(mode, _hints_taken(mode, data["data"]))
+        if points is None:
+            return None
+        if await self.bot.user_data.get_settings(user_id, "opt_out_rolling_guess_leaderboards"):  # type: ignore[union-attr]
+            return None
+        hour_count, day_count = data.get("_rate", (0, 0))
+        if _over_guess_limit(data["data"].get("attempts", 0), hour_count, day_count):
+            return 0  # too many guesses this round/hour/day - no points
+        await self.bot.user_data.add_guess_points(  # type: ignore[union-attr]
+            user_id, mode, points, periods.week_index(), periods.month_index()
+        )
+        return points
 
     async def _award(self, message: discord.Message, data: dict) -> discord.Embed:
         self.remove_guess(self.bot, message.channel.id)
@@ -592,6 +763,14 @@ class GuessCog(commands.Cog):
             )
         if data["guessType"] == "character" and data["data"].get("card_name"):
             description += f"\n**Card:** {data['data']['card_name']}"
+        points = None
+        if data["guessing"]:
+            await self.bot.user_data.add_guesses(message.author.id, data["guessing"], "success")  # type: ignore[union-attr]
+            points = await self._award_points(message.author.id, data)
+        if points:
+            description += f"\n\n**+`{points:,}`** leaderboard points!"
+        elif points == 0:
+            description += "\n\n-# No leaderboard points - guess limit reached."
         embed = embeds.success_embed(title="Correct", description=description)
         files, flags = await self._reveal_files(data)
         if flags.get("thumb"):
@@ -600,8 +779,6 @@ class GuessCog(commands.Cog):
             embed.set_image(url="attachment://image.png")
         view = _GuessResultView(self, data)
         view.message = await message.reply(embed=embed, files=files, view=view)
-        if data["guessing"]:
-            await self.bot.user_data.add_guesses(message.author.id, data["guessing"], "success")  # type: ignore[union-attr]
         return embed
 
     async def _record_fail(self, message: discord.Message, data: dict) -> None:
@@ -1527,6 +1704,341 @@ class GuessCog(commands.Cog):
         await interaction.followup.send(embed=render_rows(page_rows, 1), view=view)
         view.message = await interaction.original_response()
 
+    # --- points leaderboards (weekly / monthly) ---
+
+    @guess.command(
+        name="weekly", description="This week's combined guessing points leaderboard."
+    )
+    async def weekly(self, interaction: discord.Interaction) -> None:
+        await self._points_board(interaction, "weekly")
+
+    @guess.command(
+        name="monthly",
+        description="This month's combined guessing points leaderboard.",
+    )
+    async def monthly(self, interaction: discord.Interaction) -> None:
+        await self._points_board(interaction, "monthly")
+
+    async def _points_board(
+        self, interaction: discord.Interaction, period_type: str
+    ) -> None:
+        await interaction.response.defer(thinking=True)
+        if period_type == "weekly":
+            index = periods.week_index()
+            reset = periods.next_week_reset()
+            title = f"Weekly Leaderboard - Week {index}"
+        else:
+            index = periods.month_index()
+            reset = periods.next_month_reset()
+            title = f"Monthly Leaderboard - Month {index}"
+        per_page = GUESS_LEADERBOARD_PER_PAGE
+        rows, rank_row, total_pages = await self.bot.user_data.get_points_leaderboard(period_type, index, 1, interaction.user.id)  # type: ignore[union-attr]
+        if not rows:
+            await interaction.followup.send(
+                embed=embeds.error_embed(
+                    "No points on this leaderboard yet - go guess!"
+                )
+            )
+            return
+        has_prizes = _prizes_enabled() and await self.bot.user_data.has_claimable_prizes(interaction.user.id)  # type: ignore[union-attr]
+
+        def render(page_rows, page: int) -> discord.Embed:
+            embed = embeds.embed(title=title, color=discord.Color.gold())
+            lines = [
+                f"**#{(page - 1) * per_page + i + 1}** <@{r['discord_id']}> - `{int(r['total']):,}`"
+                for i, r in enumerate(page_rows)
+            ]
+            desc = "\n".join(lines)
+            if rank_row:
+                desc += f"\n\n-# You're **#{rank_row['rank']}** with `{int(rank_row['total']):,}` points."
+            desc += f"\n-# Resets <t:{int(reset.timestamp())}:R> · Page {page}/{total_pages}"
+            if has_prizes:
+                desc += (
+                    "\n**You have prizes waiting to be claimed!** Use `/guess prize`."
+                )
+            embed.description = desc
+            return embed
+
+        view = _PointsBoardView(
+            self, period_type, index, render, total_pages, interaction.user.id
+        )
+        await interaction.followup.send(embed=render(rows, 1), view=view)
+        view.message = await interaction.original_response()
+
+    async def _breakdown_embed(
+        self, user_id: int, period_type: str, period_index: int
+    ) -> discord.Embed:
+        breakdown = await self.bot.user_data.get_points_breakdown(user_id, period_type, period_index)  # type: ignore[union-attr]
+        label = "Week" if period_type == "weekly" else "Month"
+        embed = embeds.embed(
+            title=f"Your {label} {period_index} Points", color=discord.Color.gold()
+        )
+        lines = [
+            f"**{mode.title()}:** `{breakdown.get(mode, 0):,}`" for mode in GUESS_POINTS
+        ]
+        lines.append(f"\n**Total:** `{sum(breakdown.values()):,}`")
+        embed.description = "\n".join(lines)
+        return embed
+
+    def _prizes_embed(self, period_type: str) -> discord.Embed:
+        prizes = WEEKLY_PRIZES if period_type == "weekly" else MONTHLY_PRIZES
+        label = "Weekly" if period_type == "weekly" else "Monthly"
+        crystal = emojis.crystal
+        items = sorted(prizes.items())
+        lines: list[str] = []
+        i = 0
+        while i < len(items):  # collapse a run of equal prizes into one #a-b line
+            start_rank, prize = items[i]
+            j = i
+            while j + 1 < len(items) and items[j + 1][1] == prize:
+                j += 1
+            end_rank = items[j][0]
+            rank_label = (
+                f"#{start_rank}"
+                if start_rank == end_rank
+                else f"#{start_rank}-{end_rank}"
+            )
+            paid, free = prize
+            parts = [f"{paid:,} paid"]
+            if free:
+                parts.append(f"{free:,} free")
+            lines.append(f"**{rank_label}** - {crystal} {' + '.join(parts)} crystals")
+            i = j + 1
+        notice = (
+            "**__Prizes can only be claimed on the official Global PJSK server.__**\n"
+            "-# Prizes are not sent automatically. Claim them manually with `/guess prize` "
+            "(or by keeping your DMs on), within 3 days."
+        )
+        tos_url = get_config()["discord"].get("tos_url")
+        if tos_url:
+            notice += f"\n-# By claiming a prize you agree to the [Terms of Service]({tos_url})."
+        embed = embeds.embed(title=f"{label} Prizes", color=discord.Color.gold())
+        embed.description = "\n".join(lines) + f"\n\n{notice}"
+        return embed
+
+    # --- prize claiming ---
+
+    @guess.command(
+        name="prize", description="View, claim, or forfeit your leaderboard prizes."
+    )
+    async def prize(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if not _prizes_enabled():
+            await interaction.followup.send(
+                embed=embeds.error_embed("Prizes aren't available right now."),
+                ephemeral=True,
+            )
+            return
+        all_prizes = await self.bot.user_data.get_all_prizes(interaction.user.id)  # type: ignore[union-attr]
+        if not all_prizes:
+            await interaction.followup.send(
+                embed=embeds.embed(
+                    title="Your Prizes", description="You don't have any prizes."
+                ),
+                ephemeral=True,
+            )
+            return
+        claimable = await self.bot.user_data.get_claimable_prizes(interaction.user.id)  # type: ignore[union-attr]
+        view = _PrizeView(self, interaction.user.id, all_prizes, claimable)
+        await interaction.followup.send(embed=view.render(), view=view, ephemeral=True)
+
+    def _prize_history_embed(
+        self, prizes: list[dict], page: int, per_page: int, claimable: int
+    ) -> discord.Embed:
+        total_pages = max(1, (len(prizes) + per_page - 1) // per_page)
+        embed = embeds.embed(title="🏆 Your Prizes", color=discord.Color.gold())
+        shown = prizes[(page - 1) * per_page : page * per_page]
+        lines = [
+            f"**{_prize_label(p)}** (#{p['rank']}) - {_prize_reward(p)}\n-# {_prize_status_line(p)}"
+            for p in shown
+        ]
+        desc = "\n".join(lines) if lines else "You don't have any prizes."
+        if claimable:
+            desc = (
+                f"You have **{claimable}** prize(s) to claim - use the buttons below.\n\n"
+                + desc
+            )
+        embed.description = desc + f"\n\n-# Page {page}/{total_pages}"
+        return embed
+
+    async def _start_claim(
+        self, interaction: discord.Interaction, prize_id: int
+    ) -> None:
+        prize = await self.bot.user_data.get_prize(prize_id)  # type: ignore[union-attr]
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if (
+            not prize
+            or prize["discord_id"] != interaction.user.id
+            or prize["status"] != "unclaimed"
+            or prize["expires_at"] <= now
+        ):
+            await interaction.response.send_message(
+                embed=embeds.error_embed("This prize can no longer be claimed."),
+                ephemeral=True,
+            )
+            return
+        # the account is confirmed on every claim, so a different one can be used each time
+        pjsk_id = await self.bot.user_data.get_pjsk_id(interaction.user.id, "en")  # type: ignore[union-attr]
+        if pjsk_id:
+            await interaction.response.defer(ephemeral=True)
+            await self._show_account_confirm(interaction, prize_id, pjsk_id)
+        else:
+            await interaction.response.send_modal(_ClaimIDModal(self, prize_id))
+
+    async def _show_account_confirm(
+        self, interaction: discord.Interaction, prize_id: int, pjsk_id: int
+    ) -> None:
+        """fetch the EN profile and ask the user to confirm it's where the prize should go"""
+        try:
+            resp = await self.bot.sbuga.get_profile(pjsk_id, "en")  # type: ignore[union-attr]
+        except SbugaError:
+            await interaction.followup.send(
+                embed=embeds.error_embed(
+                    "Couldn't find that PJSK EN account. Double-check the ID."
+                ),
+                view=_ClaimIDPromptView(self, prize_id),
+                ephemeral=True,
+            )
+            return
+        profile = resp.profile
+        embed = embeds.embed(title="Confirm Your Account", color=discord.Color.gold())
+        embed.description = (
+            "Is this the PJSK **EN** account you want this prize sent to?\n\n"
+            f"**Name:** {profile['user']['name']}\n"
+            f"**User ID:** `{profile['user']['userId']}`\n"
+            f"**Rank:** 🎵 {profile['user']['rank']}"
+        )
+        await interaction.followup.send(
+            embed=embed,
+            view=_ClaimConfirmView(self, prize_id, pjsk_id),
+            ephemeral=True,
+        )
+
+    async def _do_claim(
+        self, interaction: discord.Interaction, prize_id: int, pjsk_id: int
+    ) -> None:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        claimed = await self.bot.user_data.claim_prize(prize_id, interaction.user.id, pjsk_id)  # type: ignore[union-attr]
+        if not claimed:
+            await interaction.followup.send(
+                embed=embeds.error_embed("This prize can no longer be claimed."),
+                ephemeral=True,
+            )
+            return
+        prize = await self.bot.user_data.get_prize(prize_id)  # type: ignore[union-attr]
+        if not await self._notify_prize_channel(prize, pjsk_id):
+            await self.bot.user_data.unclaim_prize(prize_id)  # type: ignore[union-attr]
+            await interaction.followup.send(
+                embed=embeds.error_embed("Claiming failed, please file a bug report."),
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            embed=embeds.success_embed(
+                f"Claimed your **{_prize_label(prize)}** prize! It's pending a manual grant - "
+                "you'll be DM'd when it's sent."
+            ),
+            ephemeral=True,
+        )
+
+    async def _notify_prize_channel(self, prize: dict, pjsk_id: int) -> bool:
+        channel_id = get_config()["discord"].get("prizes_channel_id")
+        try:
+            channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(
+                channel_id
+            )
+            embed = embeds.embed(title="Prize Claim", color=discord.Color.gold())
+            embed.description = (
+                f"<@{prize['discord_id']}> (`{prize['discord_id']}`) claimed "
+                f"**{_prize_label(prize)}** rank **#{prize['rank']}**.\n\n"
+                f"**Reward:** {_prize_reward(prize)}\n"
+                f"**Send to PJSK EN ID:** `{pjsk_id}`\n"
+                f"**Prize ID:** `{prize['id']}`"
+            )
+            await channel.send(embed=embed, view=_PrizeAdminView(prize["id"]))  # type: ignore[union-attr]
+            return True
+        except (discord.HTTPException, AttributeError):
+            return False
+
+    async def _start_forfeit(
+        self, interaction: discord.Interaction, prize_id: int, label: str
+    ) -> None:
+        await interaction.response.send_message(
+            embed=embeds.embed(
+                title="⚠️ Forfeit Prize",
+                description=(
+                    f"Forfeit your **{label}** prize? This is permanent - the prize is gone "
+                    "for good and is not transferred to anyone."
+                ),
+                color=discord.Color.red(),
+            ),
+            view=_ForfeitConfirmView(self, prize_id, label, interaction.user.id),
+            ephemeral=True,
+        )
+
+    # --- admin grant (buttons on the prize-channel message; handled persistently) ---
+
+    @commands.Cog.listener("on_interaction")
+    async def _prize_admin_interaction(self, interaction: discord.Interaction) -> None:
+        if interaction.type != discord.InteractionType.component:
+            return
+        cid = (interaction.data or {}).get("custom_id", "")
+        if not cid.startswith("prize:"):
+            return
+        _, action, sid = cid.split(":")
+        prize_id = int(sid)
+        if action == "sent":
+            await self._admin_mark(interaction, prize_id, sent=True)
+        elif action == "deny":
+            await interaction.response.send_modal(
+                _DenyReasonModal(self, prize_id, interaction.message)
+            )
+
+    async def _admin_mark(
+        self,
+        interaction: discord.Interaction,
+        prize_id: int,
+        *,
+        sent: bool,
+        reason: str = "",
+        message: "discord.Message | None" = None,
+    ) -> None:
+        prize = await self.bot.user_data.get_prize(prize_id)  # type: ignore[union-attr]
+        if not prize or prize["status"] != "pending":
+            await interaction.response.send_message(
+                embed=embeds.error_embed("This claim was already handled."),
+                ephemeral=True,
+            )
+            return
+        if sent:
+            await self.bot.user_data.complete_prize(prize_id)  # type: ignore[union-attr]
+            dm_text = f"Your prize of {_prize_reward(prize)} for {_prize_label(prize)} has been sent!"
+            outcome = f"✅ Marked **Sent** by {interaction.user.mention}."
+        else:
+            await self.bot.user_data.deny_prize(prize_id, reason)  # type: ignore[union-attr]
+            dm_text = (
+                f"Your prize claim has been denied with the following reason: {reason}\n"
+                "Please join the support server to ask for more information and/or to appeal."
+            )
+            outcome = f"❌ **Denied** by {interaction.user.mention}: {reason}"
+        try:  # DM the user; if it fails they still see the status in /guess prize
+            user = self.bot.get_user(prize["discord_id"]) or await self.bot.fetch_user(
+                prize["discord_id"]
+            )
+            await user.send(embed=embeds.embed(description=dm_text))
+        except discord.HTTPException:
+            pass
+        await interaction.response.send_message(
+            embed=embeds.success_embed("Done."), ephemeral=True
+        )
+        target = message or interaction.message
+        if target:
+            try:
+                await target.edit(content=outcome, view=None)
+            except discord.HTTPException:
+                pass
+
 
 class _GuessResultView(SbugaView):
     """buttons on a finished guess, play again plus type-specific info buttons
@@ -1645,6 +2157,308 @@ class _LeaderboardView(SbugaView):
         if self.current_page < self.total_pages:
             self.current_page += 1
         await self._go(interaction)
+
+
+class _PointsBoardView(SbugaView):
+    """weekly/monthly points board: pagination plus a per-user breakdown and (when prizes are
+    enabled) a prizes button. left unrestricted since the extra buttons reply ephemerally
+    """
+
+    def __init__(
+        self,
+        cog: "GuessCog",
+        period_type: str,
+        period_index: int,
+        render,
+        total_pages: int,
+        user_id: int,
+    ) -> None:
+        super().__init__()
+        self.cog = cog
+        self.period_type = period_type
+        self.period_index = period_index
+        self.render = render
+        self.total_pages = max(1, total_pages)
+        self.current_page = 1
+        self.user_id = user_id
+        if not _prizes_enabled():
+            self.remove_item(self.prizes)
+        self._update()
+
+    def _update(self) -> None:
+        self.previous_page.disabled = self.current_page == 1
+        self.next_page.disabled = self.current_page == self.total_pages
+
+    async def _go(self, interaction: discord.Interaction) -> None:
+        self._update()
+        rows, _, _ = await self.cog.bot.user_data.get_points_leaderboard(  # type: ignore[union-attr]
+            self.period_type, self.period_index, self.current_page, self.user_id
+        )
+        await interaction.response.edit_message(
+            embed=self.render(rows, self.current_page), view=self
+        )
+
+    @discord.ui.button(emoji="⬅️", style=discord.ButtonStyle.primary)
+    async def previous_page(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self.current_page > 1:
+            self.current_page -= 1
+        await self._go(interaction)
+
+    @discord.ui.button(emoji="➡️", style=discord.ButtonStyle.primary)
+    async def next_page(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self.current_page < self.total_pages:
+            self.current_page += 1
+        await self._go(interaction)
+
+    @discord.ui.button(label="Breakdown", style=discord.ButtonStyle.gray)
+    async def breakdown(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        embed = await self.cog._breakdown_embed(
+            interaction.user.id, self.period_type, self.period_index
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Prizes", style=discord.ButtonStyle.gray)
+    async def prizes(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await interaction.response.send_message(
+            embed=self.cog._prizes_embed(self.period_type), ephemeral=True
+        )
+
+
+def _add_claim_forfeit_buttons(view: SbugaView, cog: "GuessCog", prize: dict) -> None:
+    """attach a Claim/Forfeit pair for one prize to a view"""
+    label = _prize_label(prize)
+    claim = discord.ui.Button(
+        label=f"Claim ({label})", style=discord.ButtonStyle.success
+    )
+    forfeit = discord.ui.Button(
+        label=f"Forfeit ({label})", style=discord.ButtonStyle.danger
+    )
+
+    async def claim_cb(interaction: discord.Interaction, _id=prize["id"]) -> None:
+        await cog._start_claim(interaction, _id)
+
+    async def forfeit_cb(
+        interaction: discord.Interaction, _id=prize["id"], _l=label
+    ) -> None:
+        await cog._start_forfeit(interaction, _id, _l)
+
+    claim.callback = claim_cb
+    forfeit.callback = forfeit_cb
+    view.add_item(claim)
+    view.add_item(forfeit)
+
+
+class _PrizeClaimView(SbugaView):
+    """the claim/forfeit buttons attached to a winner's DM"""
+
+    def __init__(self, cog: "GuessCog", prizes: list[dict]) -> None:
+        super().__init__(timeout=None)
+        for prize in prizes:
+            _add_claim_forfeit_buttons(self, cog, prize)
+
+
+class _PrizeView(SbugaView):
+    """/guess prize: a paginated history of all prizes plus claim/forfeit buttons for the
+    currently-claimable ones"""
+
+    def __init__(
+        self,
+        cog: "GuessCog",
+        user_id: int,
+        all_prizes: list[dict],
+        claimable: list[dict],
+    ) -> None:
+        super().__init__(timeout=300, restrict_to=user_id)
+        self.cog = cog
+        self.all_prizes = all_prizes
+        self.claimable_count = len(claimable)
+        self.per_page = 6
+        self.total_pages = max(
+            1, (len(all_prizes) + self.per_page - 1) // self.per_page
+        )
+        self.current_page = 1
+        for prize in claimable:
+            _add_claim_forfeit_buttons(self, cog, prize)
+        self._update()
+
+    def render(self) -> discord.Embed:
+        return self.cog._prize_history_embed(
+            self.all_prizes, self.current_page, self.per_page, self.claimable_count
+        )
+
+    def _update(self) -> None:
+        self.previous_page.disabled = self.current_page == 1
+        self.next_page.disabled = self.current_page == self.total_pages
+
+    @discord.ui.button(emoji="⬅️", style=discord.ButtonStyle.primary, row=0)
+    async def previous_page(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self.current_page > 1:
+            self.current_page -= 1
+        self._update()
+        await interaction.response.edit_message(embed=self.render(), view=self)
+
+    @discord.ui.button(emoji="➡️", style=discord.ButtonStyle.primary, row=0)
+    async def next_page(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self.current_page < self.total_pages:
+            self.current_page += 1
+        self._update()
+        await interaction.response.edit_message(embed=self.render(), view=self)
+
+
+class _ClaimConfirmView(SbugaView):
+    """confirm the EN account a prize will be sent to (asked on every claim)"""
+
+    def __init__(self, cog: "GuessCog", prize_id: int, pjsk_id: int) -> None:
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.prize_id = prize_id
+        self.pjsk_id = pjsk_id
+
+    @discord.ui.button(label="Confirm & Claim", style=discord.ButtonStyle.success)
+    async def confirm(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await self.cog._do_claim(interaction, self.prize_id, self.pjsk_id)
+
+    @discord.ui.button(label="Use a Different ID", style=discord.ButtonStyle.secondary)
+    async def another(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await interaction.response.send_modal(_ClaimIDModal(self.cog, self.prize_id))
+
+
+class _ClaimIDPromptView(SbugaView):
+    """a lone button to (re)enter a PJSK EN id when the profile lookup fails"""
+
+    def __init__(self, cog: "GuessCog", prize_id: int) -> None:
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.prize_id = prize_id
+
+    @discord.ui.button(label="Enter a PJSK EN ID", style=discord.ButtonStyle.primary)
+    async def enter(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await interaction.response.send_modal(_ClaimIDModal(self.cog, self.prize_id))
+
+
+class _ClaimIDModal(discord.ui.Modal, title="Claim on a PJSK EN Account"):
+    def __init__(self, cog: "GuessCog", prize_id: int) -> None:
+        super().__init__()
+        self.cog = cog
+        self.prize_id = prize_id
+        self.pjsk_id: discord.ui.TextInput = discord.ui.TextInput(
+            label="PJSK EN User ID",
+            placeholder="The EN account to receive the prize",
+            required=True,
+        )
+        self.add_item(self.pjsk_id)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw = self.pjsk_id.value.strip()
+        if not raw.isdigit() or not 10_000_000 < int(raw) < 10_000_000_000_000_000_000:
+            await interaction.response.send_message(
+                embed=embeds.error_embed("Invalid user ID."),
+                view=_ClaimIDPromptView(self.cog, self.prize_id),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        await self.cog._show_account_confirm(interaction, self.prize_id, int(raw))
+
+
+class _ForfeitConfirmView(SbugaView):
+    def __init__(
+        self, cog: "GuessCog", prize_id: int, label: str, user_id: int
+    ) -> None:
+        super().__init__(timeout=60, restrict_to=user_id)
+        self.cog = cog
+        self.prize_id = prize_id
+        self.label = label
+
+    @discord.ui.button(label="Forfeit", style=discord.ButtonStyle.danger)
+    async def forfeit(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        ok = await self.cog.bot.user_data.forfeit_prize(self.prize_id, interaction.user.id)  # type: ignore[union-attr]
+        self._disable_all()
+        text = (
+            f"Forfeited your **{self.label}** prize."
+            if ok
+            else "This prize can no longer be forfeited."
+        )
+        await interaction.response.edit_message(
+            embed=embeds.embed(description=text), view=self
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self._disable_all()
+        await interaction.response.edit_message(
+            embed=embeds.embed(description="Cancelled - your prize is safe."), view=self
+        )
+
+
+class _PrizeAdminView(discord.ui.View):
+    """Sent / Denied buttons on the prize-channel message. custom-id only - handled by the
+    persistent on_interaction listener so they survive restarts"""
+
+    def __init__(self, prize_id: int) -> None:
+        super().__init__(timeout=None)
+        self.add_item(
+            discord.ui.Button(
+                label="Sent",
+                style=discord.ButtonStyle.success,
+                custom_id=f"prize:sent:{prize_id}",
+            )
+        )
+        self.add_item(
+            discord.ui.Button(
+                label="Denied (with reason)",
+                style=discord.ButtonStyle.danger,
+                custom_id=f"prize:deny:{prize_id}",
+            )
+        )
+
+
+class _DenyReasonModal(discord.ui.Modal, title="Deny Prize Claim"):
+    def __init__(
+        self, cog: "GuessCog", prize_id: int, message: "discord.Message | None"
+    ) -> None:
+        super().__init__()
+        self.cog = cog
+        self.prize_id = prize_id
+        self.origin = message
+        self.reason: discord.ui.TextInput = discord.ui.TextInput(
+            label="Reason for denial",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=500,
+        )
+        self.add_item(self.reason)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.cog._admin_mark(
+            interaction,
+            self.prize_id,
+            sent=False,
+            reason=self.reason.value.strip(),
+            message=self.origin,
+        )
 
 
 async def setup(bot: SbugaBot) -> None:

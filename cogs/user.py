@@ -7,7 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from helpers import embeds, tools
+from helpers import embeds, periods, tools
 from helpers.autocompletes import autocompletes
 from helpers.views import SbugaView
 from services.sbuga import SbugaError, SbugaNotFound
@@ -20,6 +20,7 @@ SETTING_NAMES = {
     "default_region": "Default Region",
     "default_difficulty": "Default Difficulty",
     "mirror_charts_by_default": "Mirror Charts by Default",
+    "opt_out_rolling_guess_leaderboards": "Opt Out of Weekly/Monthly Guess Leaderboards",
 }
 SETTING_OPTIONS = {
     "default_region": ["EN", "JP", "TW", "KR"],
@@ -27,7 +28,18 @@ SETTING_OPTIONS = {
 }
 SETTING_DESCRIPTIONS = {
     "mirror_charts_by_default": "Does not apply to guessing, only chart views.",
-    "default_difficulty": "Does NOT include Append — not every song has an Append chart.",
+    "default_difficulty": "Does NOT include Append - not every song has an Append chart.",
+    "opt_out_rolling_guess_leaderboards": (
+        "Only affects the weekly/monthly guess-points leaderboards. Opting out earns no points "
+        "and removes you from the current boards; opting back in starts you from 0."
+    ),
+}
+# settings that pop a confirmation with a warning before applying (modular for future settings)
+SETTING_CONFIRMATIONS: dict[str, str] = {
+    "opt_out_rolling_guess_leaderboards": (
+        "This immediately erases your current week and month guess-leaderboard points, and you "
+        "won't earn any while opted out. Opting back in later starts you from 0. Continue?"
+    ),
 }
 IGNORE_SETTINGS = ["first_time_guess_end"]
 
@@ -344,6 +356,18 @@ class PickSettingSelect(discord.ui.Select):
         view.message = interaction.message
 
 
+async def _apply_setting_change(
+    bot: SbugaBot, user_id: int, key: str, value: Any
+) -> dict:
+    """persist a setting change and run any side effects (opting out wipes current points)"""
+    settings = await bot.user_data.change_settings(user_id, key, value)  # type: ignore[union-attr]
+    if key == "opt_out_rolling_guess_leaderboards" and value:
+        await bot.user_data.clear_period_points(  # type: ignore[union-attr]
+            user_id, periods.week_index(), periods.month_index()
+        )
+    return settings
+
+
 class ToggleButton(discord.ui.Button):
     def __init__(
         self, bot: SbugaBot, key: str, value: bool, owner_id: int, generate
@@ -357,13 +381,85 @@ class ToggleButton(discord.ui.Button):
         self.generate = generate
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        new_value = not self.value
+        warning = SETTING_CONFIRMATIONS.get(self.key)
+        if warning:
+            await interaction.response.send_message(
+                embed=embeds.embed(
+                    title="⚠️ Confirm Change",
+                    description=warning,
+                    color=discord.Color.red(),
+                ),
+                view=ConfirmSettingView(
+                    self.bot,
+                    self.key,
+                    new_value,
+                    self.generate,
+                    interaction.user.id,
+                    interaction.message,
+                ),
+                ephemeral=True,
+            )
+            return
         await interaction.response.defer()
-        settings = await self.bot.user_data.change_settings(interaction.user.id, self.key, not self.value)  # type: ignore[union-attr]
+        settings = await _apply_setting_change(
+            self.bot, interaction.user.id, self.key, new_value
+        )
         embed, view = await self.generate(self.key, settings[self.key])
         await interaction.followup.edit_message(interaction.message.id, embed=embed, view=view)  # type: ignore[union-attr]
         view.message = interaction.message
         await interaction.followup.send(
             embed=embeds.success_embed("Setting changed."), ephemeral=True
+        )
+
+
+class ConfirmSettingView(SbugaView):
+    """Yes/No confirmation for a setting whose change needs a warning."""
+
+    def __init__(
+        self,
+        bot: SbugaBot,
+        key: str,
+        new_value: Any,
+        generate,
+        owner_id: int,
+        origin_message: "discord.Message | None",
+    ) -> None:
+        super().__init__(timeout=60, restrict_to=owner_id)
+        self.bot = bot
+        self.key = key
+        self.new_value = new_value
+        self.generate = generate
+        self.origin_message = origin_message
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+    async def confirm(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await interaction.response.defer()
+        settings = await _apply_setting_change(
+            self.bot, interaction.user.id, self.key, self.new_value
+        )
+        if self.origin_message:  # refresh the settings message behind the confirmation
+            embed, view = await self.generate(self.key, settings[self.key])
+            try:
+                await self.origin_message.edit(embed=embed, view=view)
+                view.message = self.origin_message
+            except discord.HTTPException:
+                pass
+        self._disable_all()
+        await interaction.edit_original_response(
+            embed=embeds.success_embed("Setting changed."), view=self
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await interaction.response.defer()
+        self._disable_all()
+        await interaction.edit_original_response(
+            embed=embeds.embed("Cancelled - nothing changed."), view=self
         )
 
 
