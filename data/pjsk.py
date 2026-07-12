@@ -356,10 +356,10 @@ class PJSKData:
     # --- refresh / polling ---
 
     async def _fetch_versions(self) -> dict[str, str]:
-        # must include leaks like get_musics does, or a newly-leaked song won't bump the
-        # version and the refresh gate would skip re-pulling the music that contains it
+        # the version is the game's master data version (a static dataVersion file), so it
+        # bumps whenever master data changes - including a new leak being added
         results = await asyncio.gather(
-            *[self.client.get_version(r, ignore_leak=False) for r in self.regions],
+            *[self.client.get_version(r) for r in self.regions],
             return_exceptions=True,
         )
         versions: dict[str, str] = {}
@@ -383,8 +383,10 @@ class PJSKData:
                 return False
 
             print("[PJSKData] data version changed, fetching...")
+            # ignore_leak=True includes unreleased (leaked) songs; we keep them in the data and
+            # filter app-side (released_musics / is_music_leaked / the allow_leaks setting)
             music_results = await asyncio.gather(
-                *[self.client.get_musics(r, ignore_leak=False) for r in self.regions],
+                *[self.client.get_musics(r, ignore_leak=True) for r in self.regions],
                 return_exceptions=True,
             )
             new_music: dict[str, list[Music]] = {}

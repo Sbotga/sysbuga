@@ -132,15 +132,9 @@ class SbugaClient:
 
     # --- pjsk data (existing endpoints) ---
 
-    async def get_version(
-        self, region: Region, *, ignore_leak: bool = False
-    ) -> VersionResponse:
+    async def get_version(self, region: Region) -> VersionResponse:
         return VersionResponse.model_validate(
-            await self._get(
-                "/pjsk_data/version",
-                region=region,
-                ignore_leak=str(ignore_leak).lower(),
-            )
+            await self._get("/pjsk_data/version", region=region)
         )
 
     async def get_musics(
