@@ -50,5 +50,8 @@ websockets
 # chart clip rendering (sus cut + LevelData export for /guess chart)
 sonolus_converters @ git+https://github.com/UntitledCharts/sonolus-level-converters
 
-# leader-card / deck-card image generation (/event heatmap thumbnail)
-sekai-images @ git+https://github.com/YumYummity/sekai-images
+# timezone database for zoneinfo (heatmap hour/day bucketing); Windows lacks a system one
+tzdata
+
+# fast json parsing of the event snapshot history (streamed for /event heatmap)
+orjson

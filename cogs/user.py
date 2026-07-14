@@ -10,6 +10,7 @@ from discord.ext import commands
 from helpers import embeds, periods, tools
 from helpers.autocompletes import autocompletes
 from helpers.views import SbugaView
+from services import heatmap
 from services.sbuga import SbugaError, SbugaNotFound
 
 if TYPE_CHECKING:
@@ -21,6 +22,7 @@ SETTING_NAMES = {
     "default_difficulty": "Default Difficulty",
     "mirror_charts_by_default": "Mirror Charts by Default",
     "opt_out_rolling_guess_leaderboards": "Opt Out of Weekly/Monthly Guess Leaderboards",
+    # timezone has its own /user timezone command (a select can't list every IANA zone)
 }
 SETTING_OPTIONS = {
     "default_region": ["EN", "JP", "TW", "KR"],
@@ -42,6 +44,15 @@ SETTING_CONFIRMATIONS: dict[str, str] = {
     ),
 }
 IGNORE_SETTINGS = ["first_time_guess_end"]
+
+
+async def _timezone_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return [
+        app_commands.Choice(name=tz, value=tz)
+        for tz in heatmap.timezone_suggestions(current)
+    ]
 
 
 def _joined_line(user: dict, region: str) -> str:
@@ -195,6 +206,44 @@ class UserCog(commands.Cog):
         view.add_item(_setting_picker())
         await interaction.followup.send(embed=embed, view=view)
         view.message = await interaction.original_response()
+
+    @user.command(
+        name="timezone",
+        description="Set your timezone, used by time-based commands like /event heatmap.",
+    )
+    @app_commands.autocomplete(timezone=_timezone_autocomplete)
+    @app_commands.describe(
+        timezone="A common zone (ET, PT, JST, ...) or any IANA name. Omit to see your current one."
+    )
+    async def timezone(
+        self, interaction: discord.Interaction, timezone: str | None = None
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        if timezone is None:
+            current = await self.bot.user_data.get_settings(interaction.user.id, "timezone")  # type: ignore[union-attr]
+            _, label = heatmap.resolve_tz(current)
+            await interaction.followup.send(
+                embed=embeds.embed(
+                    title="Timezone",
+                    description=f"Your timezone is `{label}`. Pass one to change it.",
+                ),
+                ephemeral=True,
+            )
+            return
+        if not heatmap.is_valid_tz(timezone):
+            await interaction.followup.send(
+                embed=embeds.error_embed(
+                    f"`{timezone}` isn't a valid timezone. Use a common one "
+                    f"({', '.join(heatmap.TIMEZONES)}) or an IANA name like `Europe/Paris`."
+                ),
+                ephemeral=True,
+            )
+            return
+        _, label = heatmap.resolve_tz(timezone)
+        await self.bot.user_data.change_settings(interaction.user.id, "timezone", timezone)  # type: ignore[union-attr]
+        await interaction.followup.send(
+            embed=embeds.success_embed(f"Timezone set to `{label}`."), ephemeral=True
+        )
 
 
 class UserIDModal(discord.ui.Modal, title="PJSK User ID"):

@@ -163,6 +163,8 @@ class SummaryCog(commands.Cog):
 
             counts: dict[str, int] = {}
             for music in self.bot.pjsk.musics():  # type: ignore[union-attr]
+                if self.bot.pjsk.is_music_limited(music.id):  # type: ignore[union-attr]
+                    continue  # limited-time songs aren't counted in the totals
                 for d in music.difficulties:
                     counts[d.difficulty] = counts.get(d.difficulty, 0) + 1
 
@@ -179,7 +181,7 @@ class SummaryCog(commands.Cog):
                 title="Your PJSK Summary", color=discord.Color.dark_gold()
             )
             embed.set_image(url="attachment://image.png")
-            embed.set_footer(text="Limited-time songs included.")
+            embed.set_footer(text="Limited time songs not included.")
             await interaction.edit_original_response(
                 embed=embed, attachments=[discord.File(img, "image.png")]
             )

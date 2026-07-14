@@ -6,7 +6,12 @@ from helpers.config_loader import get_config
 class SbugaEmbed(discord.Embed):
     def set_footer(self, *, text: str | None = None, icon_url: str | None = None):
         name = get_config()["discord"]["name"]
-        return super().set_footer(text=f"{name} " + (text or ""), icon_url=icon_url)
+        if text:
+            return super().set_footer(
+                text=f"{name} - " + (text or ""), icon_url=icon_url
+            )
+        else:
+            return super().set_footer(text=name, icon_url=icon_url)
 
 
 def embed(*args, **kwargs) -> SbugaEmbed:

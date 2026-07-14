@@ -10,6 +10,7 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "mirror_charts_by_default": False,
     "default_difficulty": "master",
     "opt_out_rolling_guess_leaderboards": False,
+    "timezone": "et",
     # activity-only (not surfaced in /user settings; set from the activity UI)
     "activity_theme": "dark",
 }

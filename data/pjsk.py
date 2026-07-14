@@ -56,6 +56,7 @@ class PJSKData:
         self._characters: list[Character] = []
         self._cc_teams: list[CheerfulCarnivalTeam] = []
         self._cards: list[Card] = []
+        self._limited_music_ids: set[int] = set()  # ids in the limitedTimeMusics master
         self._gacha_cache: dict[str, list[Gacha]] = {}
         self._versions: dict[str, str] = {}
         # last known aliases, kept so a failed fetch doesn't silently drop them from
@@ -142,6 +143,7 @@ class PJSKData:
                     for t in extra.get("cc_teams", [])
                 ]
                 self._cards = [Card.model_validate(c) for c in extra.get("cards", [])]
+                self._limited_music_ids = set(extra.get("limited_music_ids", []))
                 self._gacha_cache = {
                     r: [Gacha.model_validate(g) for g in region_gachas]
                     for r, region_gachas in extra.get("gachas", {}).items()
@@ -196,6 +198,7 @@ class PJSKData:
             "characters": [c.model_dump() for c in self._characters],
             "cc_teams": [t.model_dump() for t in self._cc_teams],
             "cards": [c.model_dump() for c in self._cards],
+            "limited_music_ids": sorted(self._limited_music_ids),
             "gachas": {
                 r: [g.model_dump() for g in region_gachas]
                 for r, region_gachas in self._gacha_cache.items()
@@ -264,6 +267,10 @@ class PJSKData:
             if m.id == music_id and m.published_at is not None
         ]
         return bool(times) and min(times) > now
+
+    def is_music_limited(self, music_id: int) -> bool:
+        """true if the song is a limited-time music (not counted toward the /summary totals)"""
+        return music_id in self._limited_music_ids
 
     def regions_for_music(self, music_id: int) -> list[str]:
         return [
@@ -666,6 +673,8 @@ class PJSKData:
         teams: dict[int, CheerfulCarnivalTeam] = {}
         cards: dict[int, Card] = {}
         new_gachas: dict[str, list[Gacha]] = {}
+        limited_ids: set[int] = set()
+        limited_fetched = False
         available = False
         for r in reversed(self.regions):  # first region in the list wins merges
             try:
@@ -691,11 +700,23 @@ class PJSKData:
             new_gachas[r] = await self._to_thread(
                 masterdata.build_gachas, gachas_raw, partial(self._asset_url, r)
             )
+            # a limited-time song in any region is limited; its own try so an unavailable file
+            # doesn't drop the region's characters/cards/gachas
+            try:
+                limited_raw = await self.client.get_master("limitedTimeMusics", r)
+                limited_fetched = True
+                for m in limited_raw:
+                    if m.get("musicId") is not None:
+                        limited_ids.add(m["musicId"])
+            except Exception:
+                pass
 
         if available:
             self._characters = list(chars.values())
             self._cc_teams = list(teams.values())
             self._cards = list(cards.values())
+            if limited_fetched:
+                self._limited_music_ids = limited_ids
         else:
             print(
                 "[PJSKData] /master character/card/gacha files not available yet — "
