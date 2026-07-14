@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 
 RANKED_REGIONS = ["en", "jp", "tw", "kr"]
 
+# TODO: the ranked web viewer is placeholdered to one url for now; add region/per-user links back
+RANKED_WEB_URL = "https://sbuga.com/information/ranked_leaderboard"
+
 GRADES_EN = {
     1: "Beginner",
     2: "Bronze",
@@ -104,7 +107,7 @@ class RankedCog(commands.Cog):
             f"**Win Rate:** `{win_rate:.2f}`%\n-# Win rate does not include draws.\n\n"
             f"**Current Winstreak:** `{season['consecutiveWinCount']}`\n"
             f"**Max Winstreak:** `{season['maxConsecutiveWinCount']}`\n\n"
-            f"### Web View: <https://sbuga.com/{region}/ranked/{ranking['userId']}>"
+            f"### Web View: <{RANKED_WEB_URL}>"
         )
         embed.description = desc
         file = discord.File(GRADE_IMAGES[grade], filename="image.png")
@@ -115,9 +118,7 @@ class RankedCog(commands.Cog):
         embed.set_footer(
             text=f"Ranked - {region.upper()} - updated {round(time.time() - data.updated)}s ago"
         )
-        view = LinkButtonView(
-            [("Web View", f"https://sbuga.com/{region}/ranked/{ranking['userId']}")]
-        )
+        view = LinkButtonView([("Web View", RANKED_WEB_URL)])
         return embed, file, view
 
     @staticmethod
@@ -145,7 +146,7 @@ class RankedCog(commands.Cog):
             if str(ranking["userId"]) in cheaters:
                 line = f"```diff\n- CHEATER 🚩 {line.replace('**', '')}\n```"
             lines.append(line)
-        lines.append(f"\n### Web View: <https://sbuga.com/{region}/ranked>")
+        lines.append(f"\n### Web View: <{RANKED_WEB_URL}>")
         embed.description = "\n".join(lines).strip()
         f_rank = ""
         if pjsk_id:

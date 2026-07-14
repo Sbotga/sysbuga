@@ -173,9 +173,15 @@ class SbugaClient:
             )
         )
 
-    async def get_current_event(self, region: Region) -> CurrentEventResponse:
+    async def get_current_event(
+        self, region: Region, *, fresh: bool = False
+    ) -> CurrentEventResponse:
         return CurrentEventResponse.model_validate(
-            await self._get("/pjsk_data/current_event", region=region)
+            await self._get(
+                "/pjsk_data/current_event",
+                region=region,
+                fresh="true" if fresh else None,
+            )
         )
 
     async def get_current_ranked(self, region: Region) -> CurrentRankedResponse:

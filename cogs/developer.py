@@ -44,8 +44,11 @@ class DevCog(commands.Cog):
         code = "\n".join(cmd)
         try:
             indented = "".join(f"\n    {line}" for line in code.split("\n")).strip()
-            exec(f"async def __ex(ctx):\n    {indented}")
-            await locals()["__ex"](ctx)
+            # exec into an explicit namespace: a function's locals() isn't a live dict, so
+            # defining __ex there and re-reading via locals() loses it (KeyError: '__ex')
+            scope = {**globals(), **locals()}
+            exec(f"async def __ex(ctx):\n    {indented}", scope)
+            await scope["__ex"](ctx)
         except Exception as e:
             result = "".join(traceback.format_exception(e)).replace("`", "\\`")
             await ctx.reply(f"**Eval failed:**\n```python\n{result}\n```")

@@ -901,14 +901,15 @@ class GuessCog(commands.Cog):
         if event.id == data["answer"]:
             await self._award(message, data)
         else:
-            await message.reply(
-                embed=embeds.error_embed(
-                    f"Incorrectly guessed {converters.describe_event_match(event.name, key)}."
-                    + GUESS_TIP
-                    + EVENT_ALIAS_PLUG,
-                    title="Incorrect",
-                )
+            wrong = embeds.error_embed(
+                f"Incorrectly guessed {converters.describe_event_match(event.name, key)}."
+                + GUESS_TIP
+                + EVENT_ALIAS_PLUG,
+                title="Incorrect",
             )
+            if event.logo_url:  # show the guessed event's thumbnail as feedback
+                wrong.set_thumbnail(url=event.logo_url)
+            await message.reply(embed=wrong)
             await self._record_fail(message, data)
 
     # --- game start ---
@@ -1177,6 +1178,9 @@ class GuessCog(commands.Cog):
             guess["answer"] = event.id
             guess["answerName"] = event.name
             guess["answer_file_path"] = io.BytesIO(bg)
+            logo = await _fetch_bytes(event.logo_url) if event.logo_url else None
+            if logo:  # event-info-style logo thumbnail on the reveal
+                guess["data"]["thumbnail"] = io.BytesIO(logo)
             cropped = await unblock.to_process_with_timeout(
                 _crop_square, bg, 250, False
             )
@@ -1196,6 +1200,9 @@ class GuessCog(commands.Cog):
             if bg:  # shown on the reveal
                 guess["answer_file_path"] = io.BytesIO(bg)
             data = guess["data"]
+            logo = await _fetch_bytes(event.logo_url) if event.logo_url else None
+            if logo:  # event-info-style logo thumbnail on the reveal
+                data["thumbnail"] = io.BytesIO(logo)
             data["lines"] = lines
             data["stage"] = 1
             data["last_hint"] = 0.0

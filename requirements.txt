@@ -42,6 +42,9 @@ colorama
 # redis
 redis
 
+# compress saved per-event snapshots/profiles once an event is past
+zstandard
+
 # websockets
 websockets
 # chart clip rendering (sus cut + LevelData export for /guess chart)

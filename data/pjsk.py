@@ -255,6 +255,10 @@ class PJSKData:
     def events(self) -> list[Event]:
         return list(self._merged_events().values())
 
+    def region_events(self, region: str) -> list[Event]:
+        """one region's events with that region's own timing (unmerged)"""
+        return list(self._event_cache.get(region, []))
+
     def get_event(self, event_id: int) -> Event | None:
         return self._merged_events().get(event_id)
 

@@ -10,6 +10,9 @@ config.yml
 # Generated data caches
 cache/
 
+# Saved per-event snapshots + profiles (kept indefinitely, zstd-compressed once past)
+event_saves/
+
 # App-specific emoji ids (regenerate: python -m scripts.upload_emojis)
 data/emojis.json
 
