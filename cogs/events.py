@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import os
 import time
@@ -447,6 +448,92 @@ EVENT_TYPE_NAMES = {
 }
 
 
+def _parse_tier(text: str) -> int | None:
+    """accept a tier written as 100, t100 or T100 -> 100; None if it isn't a plain number"""
+    text = text.strip().lstrip("tT").strip()
+    return int(text) if text.isdigit() else None
+
+
+def _border_ranks(data: CurrentEventResponse) -> list[int]:
+    """the border tiers the api is currently returning for this event, ascending"""
+    border = data.border or {}
+    ranks = {
+        r.get("rank")
+        for r in border.get("borderRankings", [])
+        if r.get("rank") is not None
+    }
+    return sorted(ranks)
+
+
+def _tier_options(data: CurrentEventResponse) -> list[int]:
+    """valid heatmap tiers in autocomplete order: the border tiers first, then the top-100 ranks
+    that aren't already a border"""
+    borders = _border_ranks(data)
+    border_set = set(borders)
+    return borders + [r for r in range(1, 101) if r not in border_set]
+
+
+async def _tier_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    region = getattr(interaction.namespace, "region", None)
+    if region not in EVENT_REGIONS:
+        region = "en"  # border tiers are the same set across regions; just need any live event
+    data = await read_current_event(region)
+    options = _tier_options(data) if data and data.event_id else list(range(1, 101))
+    query = current.strip().lstrip("tT").strip()
+    if query:
+        options = [tier for tier in options if str(tier).startswith(query)]
+    return [
+        app_commands.Choice(name=f"T{tier}", value=str(tier)) for tier in options[:25]
+    ]
+
+
+def _entry_at_tier(data: CurrentEventResponse, tier: int) -> dict | None:
+    """the leaderboard/border row sitting at a given rank, or None"""
+    top = (data.top_100 or {}).get("rankings", [])
+    border = (data.border or {}).get("borderRankings", [])
+    for entry in (*top, *border):
+        if entry.get("rank") == tier:
+            return entry
+    return None
+
+
+async def _leader_card_image(bot: SbugaBot, user_card: dict) -> bytes | None:
+    """render a player's profile leader card (from their userCard) as a small card image, or None
+    if we can't build it (missing card data, art, or the sekai_images package)"""
+    card_id = user_card.get("cardId")
+    if card_id is None:
+        return None
+    card = bot.pjsk.get_card(card_id)  # type: ignore[union-attr]
+    if card is None or not card.attr or not card.card_rarity_type:
+        return None
+    trained = user_card.get("defaultImage") == "special_training"
+    thumb_url = (
+        card.thumbnail_url_trained
+        if trained and card.thumbnail_url_trained
+        else card.thumbnail_url_normal
+    )
+    if not thumb_url:
+        return None
+    try:
+        from sekai_images import LeaderCardImage
+        from sekai_images.generators.leader_card import CardData
+
+        card_data = CardData(
+            level=user_card.get("level"),
+            mastery_rank=int(user_card.get("masterRank") or 0),
+            special_training_status=user_card.get("specialTrainingStatus")
+            or "not_doing",
+            card_rarity_type=card.card_rarity_type,
+            attr=card.attr,
+            member_image=thumb_url,  # load_image fetches the url (in the worker thread)
+        )
+        return await asyncio.to_thread(LeaderCardImage(card_data).create)
+    except Exception:
+        return None
+
+
 class EventsCog(commands.Cog):
     def __init__(self, bot: SbugaBot) -> None:
         self.bot = bot
@@ -625,6 +712,66 @@ class EventsCog(commands.Cog):
             await interaction.followup.send(embed=embeds.leak_embed())
             return
         await interaction.followup.send(embed=await self._event_embed(event_obj))
+
+    @event.command(
+        name="heatmap", description="View a tier's score heatmap for the current event."
+    )
+    @app_commands.autocomplete(
+        tier=_tier_autocomplete, region=autocompletes.pjsk_region(EVENT_REGIONS)
+    )
+    @app_commands.describe(
+        tier="Rank 1-100 or a border tier (e.g. 100, T100, T1000).",
+        region="Game server region.",
+    )
+    async def heatmap(
+        self,
+        interaction: discord.Interaction,
+        tier: str,
+        region: str = "default",
+    ) -> None:
+        await interaction.response.defer(thinking=True)
+        resolved = await self._resolve_region(interaction, region)
+        if resolved is None:
+            return
+
+        data = await read_current_event(resolved)
+        if data is None or data.event_id is None:
+            await interaction.followup.send(
+                embed=embeds.error_embed("There's no active event right now.")
+            )
+            return
+
+        parsed = _parse_tier(tier)
+        if parsed is None or parsed not in set(_tier_options(data)):
+            await interaction.followup.send(
+                embed=embeds.error_embed(
+                    f"`{tier}` isn't a valid tier. Pick a rank from 1-100 or a border "
+                    "tier (e.g. `T1000`)."
+                )
+            )
+            return
+
+        event_obj = self.bot.pjsk.get_event(data.event_id)  # type: ignore[union-attr]
+        event_name = event_obj.name if event_obj else "Event"
+        embed = embeds.embed(
+            title=f"{event_name} T{parsed} Heatmap", color=discord.Color.purple()
+        )
+        embed.set_footer(text=resolved.upper())
+
+        # thumbnail: the tier player's profile leader card
+        file: discord.File | None = None
+        entry = _entry_at_tier(data, parsed)
+        user_card = entry.get("userCard") if entry else None
+        if user_card:
+            image = await _leader_card_image(self.bot, user_card)
+            if image:
+                file = discord.File(io.BytesIO(image), filename="leader_card.png")
+                embed.set_thumbnail(url="attachment://leader_card.png")
+
+        if file is not None:
+            await interaction.followup.send(embed=embed, file=file)
+        else:
+            await interaction.followup.send(embed=embed)
 
     @event.command(name="aliases", description="View an event's aliases.")
     @app_commands.autocomplete(event=autocompletes.pjsk_event)

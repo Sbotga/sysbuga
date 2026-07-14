@@ -49,3 +49,6 @@ zstandard
 websockets
 # chart clip rendering (sus cut + LevelData export for /guess chart)
 sonolus_converters @ git+https://github.com/UntitledCharts/sonolus-level-converters
+
+# leader-card / deck-card image generation (/event heatmap thumbnail)
+sekai-images @ git+https://github.com/YumYummity/sekai-images

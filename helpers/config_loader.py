@@ -14,6 +14,9 @@ class ConfigDiscord(TypedDict):
     support_invite: str
     support_id: int
     alias_manager_role_ids: list[int]
+    chart_clips: NotRequired[
+        bool
+    ]  # false skips chart-clip rendering/pre-gen (default true)
 
 
 class ConfigSbuga(TypedDict):

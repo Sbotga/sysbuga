@@ -273,11 +273,22 @@ class GuessCog(commands.Cog):
     def __init__(self, bot: SbugaBot) -> None:
         self.bot = bot
         self.bot.cache.guess_channels = {}
+        # when off, skip the render server + clip pre-gen entirely and let chart modes fall back to
+        # a static cropped chart image (useful for local testing)
+        self._chart_clips_enabled = bool(
+            self.bot.config["discord"].get("chart_clips", True)
+        )
         chart_clip.cleanup_stale()
         self.check_guess_task.start()
         self.finalize_prizes_task.start()
 
     async def cog_load(self) -> None:
+        if not self._chart_clips_enabled:
+            self.bot.warn(
+                "chart clips disabled (config discord.chart_clips=false); chart guess modes use static images"
+            )
+            return
+
         # warm the render server then keep the clip cache topped up in the background
         async def _boot() -> None:
             chart_preview.cleanup_orphans()  # kill renderer processes a prior crash leaked
@@ -1075,7 +1086,7 @@ class GuessCog(commands.Cog):
             if mode in ("chart", "chart_append", "chart_expert"):
                 clip_hit = (
                     await self._pick_chart_clip(mode)
-                    if chart_preview.available()
+                    if self._chart_clips_enabled and chart_preview.available()
                     else None
                 )
                 if clip_hit:

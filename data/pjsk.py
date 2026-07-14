@@ -233,17 +233,37 @@ class PJSKData:
     def get_music(self, music_id: int) -> Music | None:
         return self._merged_music().get(music_id)
 
+    def _music_publish_map(self) -> dict[int, int]:
+        """song id -> earliest release timestamp across every region"""
+        out: dict[int, int] = {}
+        for musics in self._music_cache.values():
+            for m in musics:
+                if m.published_at is None:
+                    continue
+                cur = out.get(m.id)
+                if cur is None or m.published_at < cur:
+                    out[m.id] = m.published_at
+        return out
+
     def released_musics(self) -> list[Music]:
-        """merged musics already out in-game, leaks (published_at still in the future) excluded.
-        we fetch leaks so the data version keeps up, then filter them here (see get_musics)
+        """merged musics out in-game in at least one region; a song released nowhere yet (a leak)
+        is excluded. we fetch leaks so the data version keeps up, then filter them here (see
+        get_musics)
         """
         now = int(time.time() * 1000)
-        return [m for m in self.musics() if m.published_at <= now]
+        earliest = self._music_publish_map()
+        return [m for m in self.musics() if earliest.get(m.id, now + 1) <= now]
 
     def is_music_leaked(self, music_id: int) -> bool:
-        """true if the song exists in our data but isn't out in-game yet"""
-        music = self.get_music(music_id)
-        return bool(music and music.published_at > int(time.time() * 1000))
+        """true only if the song is in our data but isn't out in-game in ANY region yet"""
+        now = int(time.time() * 1000)
+        times = [
+            m.published_at
+            for musics in self._music_cache.values()
+            for m in musics
+            if m.id == music_id and m.published_at is not None
+        ]
+        return bool(times) and min(times) > now
 
     def regions_for_music(self, music_id: int) -> list[str]:
         return [
@@ -262,15 +282,35 @@ class PJSKData:
     def get_event(self, event_id: int) -> Event | None:
         return self._merged_events().get(event_id)
 
+    def _event_start_map(self) -> dict[int, int]:
+        """event id -> earliest start timestamp across every region"""
+        out: dict[int, int] = {}
+        for events in self._event_cache.values():
+            for e in events:
+                if e.start_at is None:
+                    continue
+                cur = out.get(e.id)
+                if cur is None or e.start_at < cur:
+                    out[e.id] = e.start_at
+        return out
+
     def released_events(self) -> list[Event]:
-        """merged events already started in-game, leaks (start_at in the future) excluded"""
+        """merged events already started in at least one region; leaks (not started anywhere yet)
+        excluded"""
         now = int(time.time() * 1000)
-        return [e for e in self.events() if (e.start_at or 0) <= now]
+        earliest = self._event_start_map()
+        return [e for e in self.events() if earliest.get(e.id, now + 1) <= now]
 
     def is_event_leaked(self, event_id: int) -> bool:
-        """true if the event exists in our data but hasn't started in-game yet"""
-        event = self.get_event(event_id)
-        return bool(event and (event.start_at or 0) > int(time.time() * 1000))
+        """true only if the event is in our data but hasn't started in ANY region yet"""
+        now = int(time.time() * 1000)
+        times = [
+            e.start_at
+            for events in self._event_cache.values()
+            for e in events
+            if e.id == event_id and e.start_at is not None
+        ]
+        return bool(times) and min(times) > now
 
     def characters(self) -> list[Character]:
         return self._characters
