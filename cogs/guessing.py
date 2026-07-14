@@ -236,6 +236,12 @@ def _id_collision_hint(content: str, music: Any) -> str:
     )
 
 
+def _master_notes(music: Any) -> int | None:
+    """a song's Master note count, or None for the append-only songs that have no Master chart"""
+    master = next((d for d in music.difficulties if d.difficulty == "master"), None)
+    return master.total_note_count if master else None
+
+
 def _egg_block(descriptions: list[str]) -> str:
     """the warning banner appended under the chart prompt, one bullet per triggered egg"""
     if not descriptions:
@@ -845,14 +851,16 @@ class GuessCog(commands.Cog):
                 )
             )
         else:
-            await message.reply(
-                embed=embeds.error_embed(
-                    f"Incorrectly guessed {converters.describe_song_match(music.title, key)}."
-                    + _id_collision_hint(content, music)
-                    + tip,
-                    title="Incorrect",
-                )
+            desc = (
+                f"Incorrectly guessed {converters.describe_song_match(music.title, key)}."
+                + _id_collision_hint(content, music)
             )
+            # in notes mode, show the guessed song's note count too so players can compare
+            if data["guessing"] == "notes":
+                notes = _master_notes(music)
+                if notes is not None:
+                    desc += f"\n\n**This song has `{notes}` notes on Master.**"
+            await message.reply(embed=embeds.error_embed(desc + tip, title="Incorrect"))
             await self._record_fail(message, data)
 
     async def _check_character(

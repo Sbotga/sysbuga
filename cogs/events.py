@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -145,19 +146,47 @@ async def read_event_profiles(region: str, event_id: int) -> dict[str, dict]:
         return {}
 
 
-def _write_current_event(region: str, text: str) -> None:
-    _EVENT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    path = _event_cache_path(region)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)  # atomic swap so a reader never sees a partial file
+def _fsync_dir(path: Path) -> None:
+    """flush a directory entry so a rename/unlink inside it survives a power cut. a no-op where the
+    platform can't fsync a directory (e.g. windows)"""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def _atomic_write(path: Path, text: str) -> None:
+    """write text durably: the new bytes and the rename are both fsynced, so a power loss leaves
+    either the whole old file or the whole new one - never a torn one"""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    with tmp.open("w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp.replace(path)  # atomic swap so a reader never sees a partial file
+    _fsync_dir(path.parent)
+
+
+def _write_current_event(region: str, text: str) -> None:
+    _atomic_write(_event_cache_path(region), text)
+
+
+def _needs_leading_newline(path: Path) -> bool:
+    """True if the file exists and doesn't end in a newline - so a line torn by an earlier power
+    loss can't merge with the one we're about to append"""
+    try:
+        with path.open("rb") as f:
+            if f.seek(0, 2) == 0:
+                return False
+            f.seek(-1, 2)
+            return f.read(1) != b"\n"
+    except OSError:
+        return False
 
 
 def _ranking_entry(r: dict) -> dict:
@@ -175,6 +204,31 @@ def _ranking_entry(r: dict) -> dict:
     return entry
 
 
+def _wb_ranking(chapter: dict) -> dict:
+    """a world-bloom chapter's UserWorldBloomRanking, with its rankings slimmed to lean rows"""
+    out: dict = {
+        "eventId": chapter.get("eventId"),
+        "gameCharacterId": chapter.get("gameCharacterId"),
+    }
+    if chapter.get("rankings") is not None:
+        out["rankings"] = [_ranking_entry(r) for r in chapter["rankings"]]
+    out["userRankingStatus"] = chapter.get("userRankingStatus")
+    out["isWorldBloomChapterAggregate"] = chapter.get("isWorldBloomChapterAggregate")
+    return out
+
+
+def _wb_border(chapter: dict) -> dict:
+    """a world-bloom chapter's UserWorldBloomChapterRankingBorder, with lean borderRankings"""
+    return {
+        "borderRankings": [
+            _ranking_entry(r) for r in chapter.get("borderRankings", [])
+        ],
+        "eventId": chapter.get("eventId"),
+        "gameCharacterId": chapter.get("gameCharacterId"),
+        "isWorldBloomChapterAggregate": chapter.get("isWorldBloomChapterAggregate"),
+    }
+
+
 def _ranking_snapshot(
     event_id: int, created_at: str, final: bool, top_100: dict | None
 ) -> dict:
@@ -190,15 +244,7 @@ def _ranking_snapshot(
         snap["isEventAggregate"] = top_100["isEventAggregate"]
     if top_100.get("userWorldBloomChapterRankings") is not None:
         snap["userWorldBloomChapterRankings"] = [
-            {
-                **{
-                    k: v
-                    for k, v in chapter.items()
-                    if k != "rankings" and v is not None
-                },
-                "rankings": [_ranking_entry(r) for r in chapter.get("rankings", [])],
-            }
-            for chapter in top_100["userWorldBloomChapterRankings"]
+            _wb_ranking(chapter) for chapter in top_100["userWorldBloomChapterRankings"]
         ]
     return snap
 
@@ -218,16 +264,7 @@ def _border_snapshot(
         snap["isEventAggregate"] = border["isEventAggregate"]
     if border.get("userWorldBloomChapterRankingBorders") is not None:
         snap["userWorldBloomChapterRankingBorders"] = [
-            {
-                **{
-                    k: v
-                    for k, v in chapter.items()
-                    if k != "borderRankings" and v is not None
-                },
-                "borderRankings": [
-                    _ranking_entry(r) for r in chapter.get("borderRankings", [])
-                ],
-            }
+            _wb_border(chapter)
             for chapter in border["userWorldBloomChapterRankingBorders"]
         ]
     return snap
@@ -325,8 +362,11 @@ def _store_current_event(region: str, data: CurrentEventResponse) -> None:
     }
     path = _snapshots_path(region, event_id)
     path.parent.mkdir(parents=True, exist_ok=True)
+    prefix = "\n" if _needs_leading_newline(path) else ""
     with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(line, ensure_ascii=False) + "\n")
+        f.write(prefix + json.dumps(line, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())  # the snapshot is on disk before we move on
 
 
 def _load_profiles(region: str, event_id: int) -> dict[str, dict]:
@@ -354,8 +394,12 @@ def _compress_file(path: Path) -> None:
     compressor = zstandard.ZstdCompressor(level=_ZSTD_LEVEL)
     with path.open("rb") as src, tmp.open("wb") as dst:
         compressor.copy_stream(src, dst)
+        dst.flush()
+        os.fsync(dst.fileno())  # the archive is fully on disk before we swap it in
     tmp.replace(archive)  # the archive now exists in full
-    path.unlink()  # safe to drop the source
+    _fsync_dir(archive.parent)
+    path.unlink()  # only now is it safe to drop the source
+    _fsync_dir(path.parent)
 
 
 def _compress_event_dir(event_dir: Path) -> None:
@@ -419,20 +463,36 @@ class EventsCog(commands.Cog):
     @tasks.loop(seconds=60)
     async def poll_current_event_task(self) -> None:
         """force-fetch (cache-bypassing) each region's current event + borders into its file"""
-        await asyncio.gather(
-            *(self._poll_current_event(r) for r in EVENT_REGIONS),
-            return_exceptions=True,
-        )
-        # after the first round every current event's folder exists on disk, so a sweep can safely
-        # compress everything older that a previous run left uncompressed (e.g. crash, or a restart
-        # mid event-transition) without touching a live event
-        if not self._did_startup_sweep:
-            self._did_startup_sweep = True
-            asyncio.create_task(asyncio.to_thread(_compress_stale_event_saves))
+        try:
+            await asyncio.gather(
+                *(self._poll_current_event(r) for r in EVENT_REGIONS),
+                return_exceptions=True,
+            )
+            # after the first round every current event's folder exists on disk, so a sweep can
+            # safely compress everything older that a previous run left uncompressed (a crash, or a
+            # restart mid event-transition) without touching a live event
+            if not self._did_startup_sweep:
+                self._did_startup_sweep = True
+                asyncio.create_task(asyncio.to_thread(_compress_stale_event_saves))
+        except (
+            Exception
+        ) as exc:  # this loop is important - never let a stray error stop it
+            self.bot.warn(f"event poll iteration failed: {exc!r}")  # type: ignore[union-attr]
 
     @poll_current_event_task.before_loop
     async def _before_poll(self) -> None:
-        await self.bot.wait_until_ready()
+        # this data matters, so start pulling it the moment the api client exists (during setup,
+        # before the gateway is even connected) instead of waiting on a slow discord login
+        while self.bot.sbuga is None:
+            await asyncio.sleep(0.2)
+
+    @poll_current_event_task.error
+    async def _poll_error(self, exc: Exception) -> None:
+        # last-resort backstop: if the loop ever dies, log it and bring it right back
+        self.bot.traceback(exc)  # type: ignore[union-attr]
+        await asyncio.sleep(5)
+        if not self.poll_current_event_task.is_running():
+            self.poll_current_event_task.start()
 
     async def _poll_current_event(self, region: str) -> None:
         try:
@@ -441,8 +501,9 @@ class EventsCog(commands.Cog):
             return  # keep the last good file for this region
         try:
             await asyncio.to_thread(_store_current_event, region, data)
-        except OSError:
-            pass
+        except Exception as exc:
+            # surface storage failures instead of silently dropping snapshots
+            self.bot.warn(f"[{region}] storing event {data.event_id} failed: {exc!r}")  # type: ignore[union-attr]
 
         event_id = data.event_id
         if event_id is None:

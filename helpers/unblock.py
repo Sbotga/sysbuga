@@ -14,6 +14,7 @@ import signal
 import sys
 import threading
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from functools import partial
 from typing import Any, Callable
 
@@ -39,19 +40,35 @@ def _worker_init() -> None:
             pass
 
 
+def _new_process_pool() -> ProcessPoolExecutor:
+    return ProcessPoolExecutor(
+        max_workers=2,
+        mp_context=multiprocessing.get_context("spawn"),
+        initializer=_worker_init,
+    )
+
+
 def _get_process_pool() -> ProcessPoolExecutor:
     """Lazily create the process pool on first use, so importing this module doesn't spawn
-    workers (and so the workers only start once real CPU work is submitted)."""
+    workers (and so the workers only start once real CPU work is submitted).
+
+    A `ProcessPoolExecutor` is permanently unusable once any worker dies unexpectedly, which would
+    otherwise take down *every* CPU command until the bot restarts. So if the current pool is
+    broken, we throw it away and build a fresh one - a single worker death self-heals.
+    """
     global _process_pool
-    if _process_pool is None:
-        with _process_lock:
-            if _process_pool is None:
-                _process_pool = ProcessPoolExecutor(
-                    max_workers=2,
-                    mp_context=multiprocessing.get_context("spawn"),
-                    initializer=_worker_init,
+    with _process_lock:
+        pool = _process_pool
+        if pool is None or getattr(pool, "_broken", False):
+            if pool is not None:
+                print(
+                    "[unblock] process pool broke (a worker died); recreating it",
+                    file=sys.stderr,
                 )
-    return _process_pool
+                pool.shutdown(wait=False, cancel_futures=True)
+            pool = _new_process_pool()
+            _process_pool = pool
+        return pool
 
 
 def shutdown() -> None:
@@ -73,12 +90,19 @@ async def to_process_with_timeout(
     must be importable (module-level) and its args/return picklable. The timeout cancels the
     await, not the worker — a wedged call ties up a pool slot until it returns."""
     loop = asyncio.get_running_loop()
-    try:
-        return await asyncio.wait_for(
-            loop.run_in_executor(_get_process_pool(), partial(func, *args, **kwargs)),
-            timeout,
-        )
-    except asyncio.TimeoutError:
-        raise TimeoutError(
-            f"Function {func.__name__} timed out after {timeout} seconds"
-        )
+    for attempt in range(2):
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(
+                    _get_process_pool(), partial(func, *args, **kwargs)
+                ),
+                timeout,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Function {func.__name__} timed out after {timeout} seconds"
+            )
+        except BrokenProcessPool:
+            # a worker died mid-call - _get_process_pool rebuilds the pool, so retry once
+            if attempt:
+                raise

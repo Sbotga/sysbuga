@@ -15,12 +15,25 @@ it works even while the event code is being edited.
 import sys
 from pathlib import Path
 
+import os
+
 import zstandard
 
 # keep in sync with cogs/events.py
 EVENT_SAVES_DIR = Path("event_saves")
 FILES = ("snapshots.jsonl", "profiles.json")
 ZSTD_LEVEL = 19
+
+
+def _fsync_dir(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
 
 
 def _compress_file(path: Path) -> bool:
@@ -38,7 +51,10 @@ def _compress_file(path: Path) -> bool:
     compressor = zstandard.ZstdCompressor(level=ZSTD_LEVEL)
     with path.open("rb") as src, tmp.open("wb") as dst:
         compressor.copy_stream(src, dst)
+        dst.flush()
+        os.fsync(dst.fileno())
     tmp.replace(archive)  # the archive now exists in full
+    _fsync_dir(archive.parent)
     path.unlink()  # safe to drop the source
     return True
 
