@@ -117,6 +117,19 @@ _ANNI3_CENTERS = [
     (672, -122),
 ]
 
+# each tile is built at the game's native 940x530 (UIPartsCardThumbnailXL) then scaled to the cell
+_ANNI3_ASSETS = f"{ASSETS}/image_gen/gacha_3rd_anni_assets"
+_ANNI3_TILE = (940, 530)
+_ANNI3_FRAME_SUFFIX = {
+    "rarity_1": "1",
+    "rarity_2": "2",
+    "rarity_3": "3",
+    "rarity_4": "4",
+    "rarity_birthday": "bd",
+}
+# top-left of each 55x55 star in the 940x530 tile, bottom star first (Img1..Img4)
+_ANNI3_STAR_POS = [(25, 446), (25, 398), (25, 351), (25, 303)]
+
 
 def _cover(img: Image.Image, w: int, h: int) -> Image.Image:
     """scale `img` to fully cover w x h, then center-crop the overflow."""
@@ -128,18 +141,56 @@ def _cover(img: Image.Image, w: int, h: int) -> Image.Image:
     return img.crop((left, top, left + w, top + h))
 
 
+def _build_card_tile_3rd(art: bytes, rarity: str, attr: str | None) -> Image.Image:
+    """One 940x530 3rd-anni result tile: cover-fit card illustration under the landscape rarity
+    frame, with the attribute icon (top-right) and rarity stars (bottom-left)."""
+    w, h = _ANNI3_TILE
+    tile = _cover(Image.open(io.BytesIO(art)).convert("RGBA"), w, h)
+
+    suffix = _ANNI3_FRAME_SUFFIX.get(rarity, "4")
+    frame = (
+        Image.open(f"{_ANNI3_ASSETS}/cardFrame_L_{suffix}.png")
+        .convert("RGBA")
+        .resize((w, h), Image.Resampling.LANCZOS)
+    )
+    tile.alpha_composite(frame)
+
+    if attr:
+        icon = (
+            Image.open(f"{ASSETS}/emojis/icon_attribute_{attr}.png")
+            .convert("RGBA")
+            .resize((88, 88), Image.Resampling.LANCZOS)
+        )
+        tile.alpha_composite(icon, (812, 0))
+
+    # gacha pulls are always untrained; birthday cards use the birthday star
+    star_file = (
+        STAR_FILES["birthday"]
+        if rarity == "rarity_birthday"
+        else STAR_FILES["untrained"]
+    )
+    star = (
+        Image.open(star_file).convert("RGBA").resize((55, 55), Image.Resampling.LANCZOS)
+    )
+    for i in range(RARITY_STAR_COUNT.get(rarity, 1)):
+        tile.alpha_composite(star, _ANNI3_STAR_POS[i])
+    return tile
+
+
 def _compose_ten_pull_3rd_anni(
     cards: list[tuple[bytes, str, str | None]],
 ) -> io.BytesIO:
-    """3rd anniversary gacha screen: each card's full (untrained) illustration cover-fit into
-    a 5x2 grid of 320x180 cells on the blurred 3rd-anni base."""
+    """3rd anniversary gacha screen: a 5x2 grid of framed 940x530 result tiles scaled into the
+    320x180 cells on the blurred 3rd-anni base."""
     pic = Image.open(f"{ASSETS}/image_gen/gacha_bg_3rd_anni_blur.png").convert("RGBA")
     w, h = pic.size
     s = h / 1080  # height-locked 1080p reference -> asset scale (4/3 at 1440)
     ccx, ccy = w / 2, h / 2  # screen center == image center
     cw, ch = round(_ANNI3_CELL[0] * s), round(_ANNI3_CELL[1] * s)
-    for (art, _rarity, _attr), (rx, ry) in zip(cards[:10], _ANNI3_CENTERS):
-        tile = _cover(Image.open(io.BytesIO(art)).convert("RGBA"), cw, ch)
+    for (art, rarity, attr), (rx, ry) in zip(cards[:10], _ANNI3_CENTERS):
+        tile = _build_card_tile_3rd(art, rarity, attr).resize(
+            (cw, ch), Image.Resampling.LANCZOS
+        )
         px, py = ccx + rx * s, ccy - ry * s  # Y-up -> image Y-down
         pic.alpha_composite(tile, (round(px - cw / 2), round(py - ch / 2)))
     out = io.BytesIO()
@@ -170,14 +221,8 @@ class GachaCog(commands.Cog):
             return self.bot.pjsk.get_gacha(int(banner), region)  # type: ignore[union-attr]
         return None
 
-    def _simulate(self, gacha: Gacha, reverse: bool = False) -> list[Card]:
+    def _simulate(self, gacha: Gacha, force_four_star: bool = False) -> list[Card]:
         rates = {r.card_rarity_type: r.rate for r in gacha.rarity_rates}
-        rate4 = rates.get("rarity_4", rates.get("rarity_birthday", 3.0))
-        rate3 = rates.get("rarity_3", 12.0)
-        if reverse:
-            # old Sbotga's "reverse odds": flip 4★ to the dominant rate so nearly every
-            # card comes out 4★
-            rate4 = 100 - rate4 - rate3
 
         by_rarity: dict[str, list[int]] = {}
         for cid in gacha.pool_card_ids:
@@ -185,6 +230,12 @@ class GachaCog(commands.Cog):
             if card:
                 by_rarity.setdefault(card.card_rarity_type, []).append(cid)
         pickup = set(gacha.pickup_card_ids)
+
+        # the top rarity is 4★, or birthday on a birthday gacha (which has no 4★)
+        top = "rarity_4" if by_rarity.get("rarity_4") else "rarity_birthday"
+        rate3 = rates.get("rarity_3", 12.0)
+        # force_four_star guarantees the top rarity on every pull
+        top_rate = 100.0 if force_four_star else rates.get(top, 3.0)
 
         def pick(rarity: str) -> Card | None:
             pool = by_rarity.get(rarity) or by_rarity.get("rarity_birthday")
@@ -196,13 +247,13 @@ class GachaCog(commands.Cog):
         results: list[Card] = []
         for i in range(1, 11):
             roll = random.uniform(0, 100)
-            if i == 10 and roll >= rate4 + rate3:
+            if i == 10 and roll >= top_rate + rate3:
                 roll = random.uniform(
-                    0, rate4 + rate3
+                    0, top_rate + rate3
                 )  # 10th-pull pity: guaranteed 3★+
-            if roll < rate4:
-                rarity = "rarity_4" if "rarity_4" in by_rarity else "rarity_birthday"
-            elif roll < rate4 + rate3:
+            if roll < top_rate:
+                rarity = top
+            elif roll < top_rate + rate3:
                 rarity = "rarity_3"
             else:
                 rarity = "rarity_2"
@@ -242,9 +293,9 @@ class GachaCog(commands.Cog):
                     if style == "3rd":
                         # 3rd anni tiles show the full untrained card illustration
                         return await fetch(card.card_url_normal)
-                    # 1st anni: the trimmed member cutout (square bust the tile expects); it
-                    # 404s for most non-1st-anni cards, so fall back to the (also square)
-                    # untrained thumbnail there.
+                    # 1st anni: the trimmed member cutout (the square bust the tile expects);
+                    # it 404s for most non-1st-anni cards, so fall back to the (also square)
+                    # untrained thumbnail - the same asset the LeaderCardImage sekai-image uses.
                     trm = (
                         card.cutout_url_normal.replace(
                             "/member_cutout/", "/member_cutout_trm/"
@@ -293,7 +344,7 @@ class GachaCog(commands.Cog):
         region="Game server region.",
         banner="Which gacha to pull from (name or ID; defaults to the current one).",
         style="Result-screen style (default: auto, chosen by the banner's date).",
-        four_star="Reverse the odds so nearly every card is 4★ (old Sbotga trick).",
+        force_four_star="Guarantee every pull is 4★ (or the birthday card on birthday gachas).",
     )
     async def gacha(
         self,
@@ -301,7 +352,7 @@ class GachaCog(commands.Cog):
         region: str = "default",
         banner: str | None = None,
         style: str = "auto",
-        four_star: bool = False,
+        force_four_star: bool = False,
     ) -> None:
         region = region.lower().strip()
         if region == "default":
@@ -331,7 +382,7 @@ class GachaCog(commands.Cog):
             await interaction.followup.send(embed=embeds.error_embed(msg))
             return
 
-        cards = self._simulate(gacha, reverse=four_star)
+        cards = self._simulate(gacha, force_four_star=force_four_star)
         if not cards:
             await interaction.followup.send(
                 embed=embeds.error_embed("Couldn't simulate this banner.")
@@ -345,7 +396,7 @@ class GachaCog(commands.Cog):
         elif gacha.banner_url:
             embed.set_image(url=gacha.banner_url)
         embed.set_footer(
-            text=f"{region.upper()} Gacha" + (" · 4★ odds" if four_star else "")
+            text=f"{region.upper()} Gacha" + (" · forced 4★" if force_four_star else "")
         )
         await interaction.followup.send(embed=embed, file=file or discord.utils.MISSING)
 
