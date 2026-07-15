@@ -382,6 +382,12 @@ class PJSKData:
     def get_gacha(self, gacha_id: int, region: str | None = None) -> Gacha | None:
         return next((g for g in self.gachas(region) if g.id == gacha_id), None)
 
+    def gacha_logo_url(self, gacha: Gacha, region: str) -> str | None:
+        """the gacha's logo image (gacha/{abn}/logo/logo), or None if it has no bundle name"""
+        if not gacha.asset_bundle_name:
+            return None
+        return self._asset_url(region, f"gacha/{gacha.asset_bundle_name}/logo/logo")
+
     def card_display_name(
         self, card: Card, *, use_emojis: bool = False, trained: bool = False
     ) -> str:

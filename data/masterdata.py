@@ -198,6 +198,7 @@ def build_gachas(gachas: list[dict[str, Any]], asset_url: AssetUrl) -> list[Gach
             id=g["id"],
             name=g["name"],
             gacha_type=g.get("gachaType"),
+            rarity_rate_group_id=g.get("gachaCardRarityRateGroupId"),
             start_at=g.get("startAt"),
             end_at=g.get("endAt"),
             asset_bundle_name=g.get("assetbundleName"),

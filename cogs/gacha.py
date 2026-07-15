@@ -204,13 +204,31 @@ class GachaCog(commands.Cog):
         self.bot = bot
         self.cooldowns: dict[int, float] = {}
 
+    def _is_event_banner(self, gacha: Gacha) -> bool:
+        """True for an Event / Limited Event banner: a spark ('ceil') gacha at the standard
+        rarity rate (group 1, i.e. not a Bloom Festival or Birthday banner) whose pickup
+        features a freshly-released card - which rules out returning ('It's Back') and
+        world-link-support re-runs, whose pickups are old cards."""
+        if gacha.gacha_type != "ceil" or gacha.rarity_rate_group_id != 1:
+            return False
+        if not (gacha.start_at and gacha.pickup_card_ids):
+            return False
+        releases = [
+            card.release_at
+            for cid in gacha.pickup_card_ids
+            if (card := self.bot.pjsk.get_card(cid)) and card.release_at  # type: ignore[union-attr]
+        ]
+        return bool(releases) and max(releases) >= gacha.start_at - 30 * 86_400_000
+
     def _current_gacha(self, region: str) -> Gacha | None:
         gachas = self.bot.pjsk.gachas(region)  # type: ignore[union-attr]
         if not gachas:
             return None
         now = int(time.time() * 1000)
-        current = [g for g in gachas if (g.start_at or 0) <= now <= (g.end_at or 0)]
-        return current[0] if current else max(gachas, key=lambda g: g.start_at or 0)
+        # the "current" banner is the newest already-released Event/Limited Event banner
+        released = [g for g in gachas if (g.start_at or 0) <= now]
+        pool = [g for g in released if self._is_event_banner(g)] or released
+        return max(pool, key=lambda g: g.start_at or 0) if pool else None
 
     def _get_gacha(self, region: str, banner: str | None) -> Gacha | None:
         """A specific banner by id when given, otherwise the current one."""
@@ -384,6 +402,9 @@ class GachaCog(commands.Cog):
             return
 
         embed = embeds.embed(title=f"Ten Pull - {gacha.name}")
+        logo = self.bot.pjsk.gacha_logo_url(gacha, region)  # type: ignore[union-attr]
+        if logo:
+            embed.set_thumbnail(url=logo)
         file = await self._pull_image(cards, self._resolve_style(region, gacha, style))
         if file:
             embed.set_image(url="attachment://gacha.jpg")

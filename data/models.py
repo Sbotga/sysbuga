@@ -216,6 +216,7 @@ class Gacha(BaseModel):
     id: int
     name: str
     gacha_type: str | None = None
+    rarity_rate_group_id: int | None = None
     start_at: int | None = None
     end_at: int | None = None
     asset_bundle_name: str | None = None
