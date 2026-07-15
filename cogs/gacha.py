@@ -15,6 +15,7 @@ from discord.ext import commands
 from data.models import Card, Gacha
 from helpers import embeds, unblock
 from helpers.autocompletes import autocompletes
+from helpers.views import SbugaView
 
 if TYPE_CHECKING:
     from main import SbugaBot
@@ -199,6 +200,55 @@ def _compose_ten_pull_3rd_anni(
     return out
 
 
+class _RerollView(SbugaView):
+    """A blue Reroll button that re-pulls the same banner (command invoker only)."""
+
+    def __init__(
+        self,
+        cog: GachaCog,
+        gacha: Gacha,
+        region: str,
+        style: str,
+        force_four_star: bool,
+        restrict_to: int,
+    ) -> None:
+        super().__init__(timeout=180, restrict_to=restrict_to)
+        self.cog = cog
+        self.gacha = gacha
+        self.region = region
+        self.style = style
+        self.force_four_star = force_four_star
+        self._busy = False  # serialize rerolls so a click can't stack mid-render
+
+    @discord.ui.button(label="Reroll", style=discord.ButtonStyle.primary, emoji="🔁")
+    async def reroll(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if self._busy:
+            await interaction.response.defer()
+            return
+        self._busy = True
+        # swap to a loading state immediately so it's clear something is happening
+        await interaction.response.edit_message(
+            embed=embeds.embed(
+                title=f"Ten Pull - {self.gacha.name}", description="🔁 Rerolling..."
+            ),
+            attachments=[],
+            view=self,
+        )
+        try:
+            result = await self.cog._pull_result(
+                self.gacha, self.region, self.style, self.force_four_star
+            )
+            if result is not None:
+                embed, file = result
+                await interaction.edit_original_response(
+                    embed=embed, attachments=[file] if file else [], view=self
+                )
+        finally:
+            self._busy = False
+
+
 class GachaCog(commands.Cog):
     def __init__(self, bot: SbugaBot) -> None:
         self.bot = bot
@@ -339,6 +389,28 @@ class GachaCog(commands.Cog):
             self.bot.warn(f"gacha image failed: {e}")
             return None
 
+    async def _pull_result(
+        self, gacha: Gacha, region: str, style: str, force_four_star: bool
+    ) -> tuple[discord.Embed, discord.File | None] | None:
+        """Simulate and render one ten-pull -> (embed, image file), or None if the banner has
+        no pullable cards."""
+        cards = self._simulate(gacha, force_four_star=force_four_star)
+        if not cards:
+            return None
+        embed = embeds.embed(title=f"Ten Pull - {gacha.name}")
+        logo = self.bot.pjsk.gacha_logo_url(gacha, region)  # type: ignore[union-attr]
+        if logo:
+            embed.set_thumbnail(url=logo)
+        file = await self._pull_image(cards, self._resolve_style(region, gacha, style))
+        if file:
+            embed.set_image(url="attachment://gacha.jpg")
+        elif gacha.banner_url:
+            embed.set_image(url=gacha.banner_url)
+        embed.set_footer(
+            text=f"{region.upper()} Gacha" + (" · forced 4★" if force_four_star else "")
+        )
+        return embed, file
+
     @app_commands.command(
         name="gacha", description="Simulate a ten-pull on the current banner."
     )
@@ -397,26 +469,20 @@ class GachaCog(commands.Cog):
             await interaction.followup.send(embed=embeds.error_embed(msg))
             return
 
-        cards = self._simulate(gacha, force_four_star=force_four_star)
-        if not cards:
+        result = await self._pull_result(gacha, region, style, force_four_star)
+        if result is None:
             await interaction.followup.send(
                 embed=embeds.error_embed("Couldn't simulate this banner.")
             )
             return
-
-        embed = embeds.embed(title=f"Ten Pull - {gacha.name}")
-        logo = self.bot.pjsk.gacha_logo_url(gacha, region)  # type: ignore[union-attr]
-        if logo:
-            embed.set_thumbnail(url=logo)
-        file = await self._pull_image(cards, self._resolve_style(region, gacha, style))
-        if file:
-            embed.set_image(url="attachment://gacha.jpg")
-        elif gacha.banner_url:
-            embed.set_image(url=gacha.banner_url)
-        embed.set_footer(
-            text=f"{region.upper()} Gacha" + (" · forced 4★" if force_four_star else "")
+        embed, file = result
+        view = _RerollView(
+            self, gacha, region, style, force_four_star, restrict_to=interaction.user.id
         )
-        await interaction.followup.send(embed=embed, file=file or discord.utils.MISSING)
+        await interaction.followup.send(
+            embed=embed, file=file or discord.utils.MISSING, view=view
+        )
+        view.message = await interaction.original_response()
 
 
 async def setup(bot: SbugaBot) -> None:
