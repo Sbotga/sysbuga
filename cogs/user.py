@@ -304,7 +304,7 @@ class UserIDModal(discord.ui.Modal, title="PJSK User ID"):
                 f"{_joined_line(data['user'], self.region)}"
                 f"**Rank:** **`🎵 {data['user']['rank']}`**\n\n"
                 f"**Bio**\n```{data['userProfile'].get('word') or 'No Bio'}```\n"
-                "### ℹ️ Press the button after setting your bio. Slow wifi may need a few seconds."
+                "### ℹ️ __Press the back button after setting your bio. Slow wifi may need a few seconds.__"
             ),
             color=discord.Color.dark_magenta(),
         )

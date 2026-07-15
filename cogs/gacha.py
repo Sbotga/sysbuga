@@ -22,6 +22,10 @@ if TYPE_CHECKING:
 GACHA_REGIONS = ["en", "jp", "tw", "kr"]
 COOLDOWN = 20
 
+# the 3rd-anniversary result screen debuted with song "NEO" (music id 366), which released on
+# a different date per region - banners from that date on use the 3rd-anni style, earlier ones 1st
+_NEO_MUSIC_ID = 366
+
 ASSETS = "data/assets"
 STAR_FILES = {
     "trained": f"{ASSETS}/emojis/rarity_star_afterTraining.png",
@@ -41,7 +45,9 @@ RARITY_STAR_COUNT = {
 def _card_thumbnail(cutout: bytes, rarity: str, attr: str | None) -> Image.Image:
     """One 338x338 gacha result tile: masked cutout + rarity frame + stars + attr."""
     pic = Image.new("RGBA", (338, 338), (0, 0, 0, 0))
-    mask_img = Image.open(f"{ASSETS}/image_gen/gachacardmask.png").convert("RGBA")
+    mask_img = Image.open(f"{ASSETS}/image_gen/gacha_card_mask_1st_anni.png").convert(
+        "RGBA"
+    )
     mask = mask_img.split()[3]
     art = Image.open(io.BytesIO(cutout)).convert("RGBA")
     art = art.resize(mask_img.size, Image.Resampling.LANCZOS)
@@ -74,16 +80,68 @@ def _card_thumbnail(cutout: bytes, rarity: str, attr: str | None) -> Image.Image
     return pic
 
 
-def _compose_ten_pull(cards: list[tuple[bytes, str, str | None]]) -> io.BytesIO:
-    """The old Sbotga gacha screen: 2 rows of 5 tiles on the gacha background."""
-    pic = Image.open(f"{ASSETS}/image_gen/gacha.png").convert("RGBA")
+def _compose_ten_pull_1st_anni(
+    cards: list[tuple[bytes, str, str | None]],
+) -> io.BytesIO:
+    """1st anniversary gacha screen: 2 rows of 5 tiles on the 1st-anni background.
+    The bg was cropped 300px off top and bottom, so tile/cover y-offsets are shifted up 300.
+    """
+    pic = Image.open(f"{ASSETS}/image_gen/gacha_bg_1st_anni.png").convert("RGBA")
     cover = Image.new("RGB", (1550, 600), (255, 255, 255))
-    pic.paste(cover, (314, 500))
+    pic.paste(cover, (314, 200))
     for i, (cutout, rarity, attr) in enumerate(cards[:10]):
         thumb = _card_thumbnail(cutout, rarity, attr).resize((263, 263))
         x = 336 + 304 * (i % 5)
-        y = 520 if i < 5 else 825
+        y = 220 if i < 5 else 525
         pic.paste(thumb, (x, y), thumb.split()[3])
+    out = io.BytesIO()
+    pic.convert("RGB").save(out, "JPEG")
+    out.seek(0)
+    return out
+
+
+# 3rd anniversary layout: a 5x2 grid on the blurred base. The spec is a height-locked 1080p
+# reference (the base is 1.75:1, so the frame is 1890x1080) scaled onto the 2520x1440 asset by
+# 4/3, with screen center at the image center. Card centers are (x, y), Y-up from that center.
+_ANNI3_CELL = (320, 180)  # reference-unit cell size
+_ANNI3_CENTERS = [
+    (-672, 122),
+    (-336, 122),
+    (0, 122),
+    (336, 122),
+    (672, 122),
+    (-672, -122),
+    (-336, -122),
+    (0, -122),
+    (336, -122),
+    (672, -122),
+]
+
+
+def _cover(img: Image.Image, w: int, h: int) -> Image.Image:
+    """scale `img` to fully cover w x h, then center-crop the overflow."""
+    iw, ih = img.size
+    scale = max(w / iw, h / ih)
+    nw, nh = max(w, round(iw * scale)), max(h, round(ih * scale))
+    img = img.resize((nw, nh), Image.Resampling.LANCZOS)
+    left, top = (nw - w) // 2, (nh - h) // 2
+    return img.crop((left, top, left + w, top + h))
+
+
+def _compose_ten_pull_3rd_anni(
+    cards: list[tuple[bytes, str, str | None]],
+) -> io.BytesIO:
+    """3rd anniversary gacha screen: each card's full (untrained) illustration cover-fit into
+    a 5x2 grid of 320x180 cells on the blurred 3rd-anni base."""
+    pic = Image.open(f"{ASSETS}/image_gen/gacha_bg_3rd_anni_blur.png").convert("RGBA")
+    w, h = pic.size
+    s = h / 1080  # height-locked 1080p reference -> asset scale (4/3 at 1440)
+    ccx, ccy = w / 2, h / 2  # screen center == image center
+    cw, ch = round(_ANNI3_CELL[0] * s), round(_ANNI3_CELL[1] * s)
+    for (art, _rarity, _attr), (rx, ry) in zip(cards[:10], _ANNI3_CENTERS):
+        tile = _cover(Image.open(io.BytesIO(art)).convert("RGBA"), cw, ch)
+        px, py = ccx + rx * s, ccy - ry * s  # Y-up -> image Y-down
+        pic.alpha_composite(tile, (round(px - cw / 2), round(py - ch / 2)))
     out = io.BytesIO()
     pic.convert("RGB").save(out, "JPEG")
     out.seek(0)
@@ -103,10 +161,23 @@ class GachaCog(commands.Cog):
         current = [g for g in gachas if (g.start_at or 0) <= now <= (g.end_at or 0)]
         return current[0] if current else max(gachas, key=lambda g: g.start_at or 0)
 
-    def _simulate(self, gacha: Gacha) -> list[Card]:
+    def _get_gacha(self, region: str, banner: str | None) -> Gacha | None:
+        """A specific banner by id when given, otherwise the current one."""
+        if not banner:
+            return self._current_gacha(region)
+        banner = banner.strip()
+        if banner.isdigit():
+            return self.bot.pjsk.get_gacha(int(banner), region)  # type: ignore[union-attr]
+        return None
+
+    def _simulate(self, gacha: Gacha, reverse: bool = False) -> list[Card]:
         rates = {r.card_rarity_type: r.rate for r in gacha.rarity_rates}
         rate4 = rates.get("rarity_4", rates.get("rarity_birthday", 3.0))
         rate3 = rates.get("rarity_3", 12.0)
+        if reverse:
+            # old Sbotga's "reverse odds": flip 4★ to the dominant rate so nearly every
+            # card comes out 4★
+            rate4 = 100 - rate4 - rate3
 
         by_rarity: dict[str, list[int]] = {}
         for cid in gacha.pool_card_ids:
@@ -140,24 +211,63 @@ class GachaCog(commands.Cog):
                 results.append(picked)
         return results
 
-    async def _pull_image(self, cards: list[Card]) -> discord.File | None:
-        """Compose the ten-pull screen; None if any cutout can't be fetched."""
-        urls = [c.cutout_url_normal for c in cards]
-        if not all(urls):
-            return None
+    def _resolve_style(self, region: str, gacha: Gacha, override: str) -> str:
+        """The result-screen style, '1st' or '3rd'. `override` forces it; 'auto' picks 3rd for
+        banners from NEO's (per-region) release onward, otherwise 1st."""
+        if override in ("1st", "3rd"):
+            return override
+        neo = self.bot.pjsk.region_music(region, _NEO_MUSIC_ID)  # type: ignore[union-attr]
+        if neo and (gacha.start_at or 0) >= neo.published_at:
+            return "3rd"
+        return "1st"
+
+    async def _pull_image(self, cards: list[Card], style: str) -> discord.File | None:
+        """Compose the ten-pull screen in `style` ('1st'/'3rd'); None if any card's art can't
+        be fetched."""
         try:
             async with aiohttp.ClientSession() as cs:
 
-                async def fetch(url: str) -> bytes:
-                    async with cs.get(url) as resp:
-                        resp.raise_for_status()
-                        return await resp.read()
+                async def fetch(url: str | None) -> bytes | None:
+                    if not url:
+                        return None
+                    try:
+                        async with cs.get(url) as resp:
+                            if resp.status == 200:
+                                return await resp.read()
+                    except aiohttp.ClientError:
+                        pass
+                    return None
 
-                cutouts = await asyncio.gather(*(fetch(u) for u in urls))  # type: ignore[arg-type]
+                async def fetch_art(card: Card) -> bytes | None:
+                    if style == "3rd":
+                        # 3rd anni tiles show the full untrained card illustration
+                        return await fetch(card.card_url_normal)
+                    # 1st anni: the trimmed member cutout (square bust the tile expects); it
+                    # 404s for most non-1st-anni cards, so fall back to the (also square)
+                    # untrained thumbnail there.
+                    trm = (
+                        card.cutout_url_normal.replace(
+                            "/member_cutout/", "/member_cutout_trm/"
+                        )
+                        if card.cutout_url_normal
+                        else None
+                    )
+                    return await fetch(trm) or await fetch(card.thumbnail_url_normal)
+
+                arts = await asyncio.gather(*(fetch_art(c) for c in cards))
+            if any(a is None for a in arts):
+                return None
+            composer = (
+                _compose_ten_pull_3rd_anni
+                if style == "3rd"
+                else _compose_ten_pull_1st_anni
+            )
             payload = [
-                (data, c.card_rarity_type, c.attr) for data, c in zip(cutouts, cards)
+                (data, c.card_rarity_type, c.attr)
+                for data, c in zip(arts, cards)
+                if data is not None
             ]
-            buf = await unblock.to_process_with_timeout(_compose_ten_pull, payload)
+            buf = await unblock.to_process_with_timeout(composer, payload)
             return discord.File(buf, "gacha.jpg")
         except Exception as e:
             self.bot.warn(f"gacha image failed: {e}")
@@ -168,10 +278,30 @@ class GachaCog(commands.Cog):
     )
     @app_commands.allowed_installs(guilds=True, users=True)
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-    @app_commands.autocomplete(region=autocompletes.pjsk_region(GACHA_REGIONS))
-    @app_commands.describe(region="Game server region.")
+    @app_commands.autocomplete(
+        region=autocompletes.pjsk_region(GACHA_REGIONS),
+        banner=autocompletes.pjsk_gacha,
+    )
+    @app_commands.choices(
+        style=[
+            app_commands.Choice(name="Auto (by banner date)", value="auto"),
+            app_commands.Choice(name="1st Anniversary", value="1st"),
+            app_commands.Choice(name="3rd Anniversary", value="3rd"),
+        ]
+    )
+    @app_commands.describe(
+        region="Game server region.",
+        banner="Which gacha to pull from (name or ID; defaults to the current one).",
+        style="Result-screen style (default: auto, chosen by the banner's date).",
+        four_star="Reverse the odds so nearly every card is 4★ (old Sbotga trick).",
+    )
     async def gacha(
-        self, interaction: discord.Interaction, region: str = "default"
+        self,
+        interaction: discord.Interaction,
+        region: str = "default",
+        banner: str | None = None,
+        style: str = "auto",
+        four_star: bool = False,
     ) -> None:
         region = region.lower().strip()
         if region == "default":
@@ -191,35 +321,32 @@ class GachaCog(commands.Cog):
         self.cooldowns[interaction.user.id] = time.time()
 
         await interaction.response.defer(thinking=True)
-        gacha = self._current_gacha(region)
+        gacha = self._get_gacha(region, banner)
         if not gacha:
-            await interaction.followup.send(
-                embed=embeds.error_embed("No gacha banner data is available right now.")
+            msg = (
+                f"No {region.upper()} gacha matches `{banner}`."
+                if banner
+                else "No gacha banner data is available right now."
             )
+            await interaction.followup.send(embed=embeds.error_embed(msg))
             return
 
-        cards = self._simulate(gacha)
+        cards = self._simulate(gacha, reverse=four_star)
         if not cards:
             await interaction.followup.send(
                 embed=embeds.error_embed("Couldn't simulate this banner.")
             )
             return
 
-        pickup = set(gacha.pickup_card_ids)
-        lines = [
-            self.bot.pjsk.card_display_name(c, use_emojis=True)  # type: ignore[union-attr]
-            + (" [pickup]" if c.id in pickup else "")
-            for c in cards
-        ]
-        embed = embeds.embed(
-            title=f"Ten Pull - {gacha.name}", description="\n".join(lines)
-        )
-        file = await self._pull_image(cards)
+        embed = embeds.embed(title=f"Ten Pull - {gacha.name}")
+        file = await self._pull_image(cards, self._resolve_style(region, gacha, style))
         if file:
             embed.set_image(url="attachment://gacha.jpg")
         elif gacha.banner_url:
             embed.set_image(url=gacha.banner_url)
-        embed.set_footer(text=f"{region.upper()} Current Gacha")
+        embed.set_footer(
+            text=f"{region.upper()} Gacha" + (" · 4★ odds" if four_star else "")
+        )
         await interaction.followup.send(embed=embed, file=file or discord.utils.MISSING)
 
 

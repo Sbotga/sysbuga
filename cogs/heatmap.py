@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 import discord
@@ -11,12 +12,14 @@ from discord.ext import commands
 
 from helpers import embeds
 from helpers.autocompletes import autocompletes
+from helpers.views import SbugaView
 from services import heatmap
 from services.event_store import EVENT_REGIONS, iter_snapshots, read_current_event
 from services.models import CurrentEventResponse
 
 if TYPE_CHECKING:
     from cogs.information import InfoCog
+    from data.models import Event
     from main import SbugaBot
 
 _HEATMAP_MAX_TIER = 100  # heatmap only covers the top 100
@@ -85,6 +88,160 @@ async def _timezone_autocomplete(
     ]
 
 
+@dataclass
+class _Selection:
+    """one view of an event: the overall ranking, or a single world-link chapter."""
+
+    character_id: int | None  # focus character of a chapter; None for overall/finale
+    button_label: (
+        str  # "Overall" or the character's name; also the image's section line
+    )
+    start_at: int
+    end_at: int
+    progressed: bool  # the chapter has started (complete or in progress)
+    is_chapter: bool
+
+
+@dataclass
+class _HeatmapState:
+    """everything needed to (re)render any selection of one heatmap, minus the selection."""
+
+    resolved: str
+    tz: object
+    tz_label: str
+    tz_overridden: bool
+    data: CurrentEventResponse
+    mode: str
+    key: int
+    label: str
+    event_name: str
+    event_id: int
+    username: str | None
+    thumb_png: bytes | None
+    world_link: bool  # show the chapter/"Overall" section line and chapter buttons
+
+
+def _overall_rank(data: CurrentEventResponse, key: int) -> int | None:
+    for row in (data.top_100 or {}).get("rankings", []):
+        if str(row.get("userId")) == str(key):
+            return row.get("rank")
+    return None
+
+
+def _chapter_rank(data: CurrentEventResponse, key: int, cid: int | None) -> int | None:
+    for chap in (data.top_100 or {}).get("userWorldBloomChapterRankings", []):
+        if chap.get("gameCharacterId") == cid:
+            for row in chap.get("rankings", []):
+                if str(row.get("userId")) == str(key):
+                    return row.get("rank")
+    return None
+
+
+async def _render_selection(
+    state: _HeatmapState, sel: _Selection
+) -> tuple[discord.Embed, discord.File]:
+    """render one selection to (embed, attached png). No bot access needed."""
+    current_rank: int | None = None
+    if state.mode == "user":
+        current_rank = (
+            _chapter_rank(state.data, state.key, sel.character_id)
+            if sel.is_chapter
+            else _overall_rank(state.data, state.key)
+        )
+    # the title is constant across selections; the chapter name goes on its own line in the
+    # image (the section) so switching chapters only changes the graph, not the embed
+    section = sel.button_label if state.world_link else None
+    graph_title = " ".join(
+        p
+        for p in (
+            f"({state.resolved.upper()})",
+            state.event_name,
+            state.label,
+            "Heatmap",
+        )
+        if p
+    )
+    embed = embeds.embed(
+        title=" ".join(p for p in (state.event_name, state.label, "Heatmap") if p),
+        color=discord.Color.purple(),
+    )
+    embed.description = f"**Last Data Update:** <t:{int(state.data.updated)}:R>"
+    embed.set_footer(text=state.resolved.upper())
+    # a lazy generator - streamed + parsed inside the worker thread, so a full event's
+    # snapshots never all sit in memory at once
+    png = await asyncio.to_thread(
+        heatmap.render_heatmap,
+        sel.start_at,
+        sel.end_at,
+        int(time.time() * 1000),
+        graph_title,
+        state.tz,
+        state.tz_label,
+        state.tz_overridden,
+        iter_snapshots(state.resolved, state.event_id),
+        state.mode,
+        state.key,
+        current_rank,
+        state.username,
+        state.thumb_png,
+        section,
+        sel.character_id,
+        sel.is_chapter,
+    )
+    embed.set_image(url="attachment://heatmap.png")
+    return embed, discord.File(io.BytesIO(png), filename="heatmap.png")
+
+
+class _ChapterButton(discord.ui.Button):
+    """switches the heatmap to one selection. Grayed out when it's the current view or an
+    unavailable (not-yet-started) chapter; clickable otherwise."""
+
+    def __init__(self, index: int, sel: _Selection, current: bool) -> None:
+        available = sel.progressed and not current
+        super().__init__(
+            label=sel.button_label,
+            style=(
+                discord.ButtonStyle.primary
+                if available
+                else discord.ButtonStyle.secondary
+            ),
+            disabled=not available,
+            row=index // 5,
+        )
+        self.index = index
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        assert isinstance(self.view, _HeatmapView)
+        await self.view.show(interaction, self.index)
+
+
+class _HeatmapView(SbugaView):
+    """chapter navigation for a world-link heatmap: an Overall button plus one per chapter."""
+
+    def __init__(
+        self, state: _HeatmapState, selections: list[_Selection], restrict_to: int
+    ) -> None:
+        super().__init__(timeout=600, restrict_to=restrict_to)
+        self.state = state
+        self.selections = selections
+        self.selected = 0
+        self._build()
+
+    def _build(self) -> None:
+        self.clear_items()
+        for i, sel in enumerate(self.selections):
+            self.add_item(_ChapterButton(i, sel, current=i == self.selected))
+
+    async def show(self, interaction: discord.Interaction, index: int) -> None:
+        self.selected = index
+        self._build()
+        await interaction.response.defer()  # render may take a moment; ack first
+        embed, file = await _render_selection(self.state, self.selections[index])
+        await interaction.edit_original_response(
+            embed=embed, attachments=[file], view=self
+        )
+
+
 class HeatmapCog(commands.Cog):
     def __init__(self, bot: SbugaBot) -> None:
         self.bot = bot
@@ -140,7 +297,41 @@ class HeatmapCog(commands.Cog):
             return None
         return resolved, tz, tz_label, timezone is not None, data
 
-    async def _render_heatmap(
+    def _selections(self, timing: Event, event_name: str) -> list[_Selection]:
+        """the Overall view plus one per world-link chapter (empty of chapters for a normal
+        event). chapters are ordered by chapter number and labelled by their focus character.
+        """
+        now = int(time.time() * 1000)
+        selections = [
+            _Selection(
+                character_id=None,
+                button_label="Overall",
+                start_at=timing.start_at,  # type: ignore[arg-type]
+                end_at=timing.aggregate_at,  # type: ignore[arg-type]
+                progressed=True,
+                is_chapter=False,
+            )
+        ]
+        for wb in timing.world_blooms:
+            char = self.bot.pjsk.get_character(wb.game_character_id) if wb.game_character_id else None  # type: ignore[union-attr,arg-type]
+            name = (
+                char.given_name
+                if char and char.given_name
+                else f"Chapter {wb.chapter_no}"
+            )
+            selections.append(
+                _Selection(
+                    character_id=wb.game_character_id,
+                    button_label=name,
+                    start_at=wb.start_at,
+                    end_at=wb.aggregate_at,
+                    progressed=wb.start_at <= now,
+                    is_chapter=True,
+                )
+            )
+        return selections
+
+    async def _send_heatmap(
         self,
         interaction: discord.Interaction,
         resolved: str,
@@ -152,20 +343,12 @@ class HeatmapCog(commands.Cog):
         key: int,
         label: str,
         *,
-        current_rank: int | None = None,
         username: str | None = None,
         thumb_png: bytes | None = None,
     ) -> None:
         event_obj = self.bot.pjsk.get_event(data.event_id)  # type: ignore[union-attr,arg-type]
         event_name = event_obj.name if event_obj else "Event"
-        embed = embeds.embed(
-            title=" ".join(p for p in (event_name, label, "Heatmap") if p),
-            color=discord.Color.purple(),
-        )
-        embed.description = f"**Last Data Update:** <t:{int(data.updated)}:R>"
-        embed.set_footer(text=resolved.upper())
-
-        files: list[discord.File] = []
+        # the region's own event carries region-specific chapter timing; fall back to the merge
         timing = (
             next(
                 (
@@ -177,45 +360,54 @@ class HeatmapCog(commands.Cog):
             )
             or event_obj
         )
-        if timing and timing.start_at and timing.aggregate_at:
-            graph_title = " ".join(
-                p for p in (f"({resolved.upper()})", event_name, label, "Heatmap") if p
+        if not (timing and timing.start_at and timing.aggregate_at):
+            embed = embeds.embed(
+                title=" ".join(p for p in (event_name, label, "Heatmap") if p),
+                color=discord.Color.purple(),
             )
-            # a lazy generator - streamed + parsed inside the worker thread, so a full event's
-            # snapshots never all sit in memory at once
-            png = await asyncio.to_thread(
-                heatmap.render_heatmap,
-                timing.start_at,
-                timing.aggregate_at,
-                int(time.time() * 1000),
-                graph_title,
-                tz,
-                tz_label,
-                tz_overridden,
-                iter_snapshots(resolved, data.event_id),
-                mode,
-                key,
-                current_rank,
-                username,
-                thumb_png,
-            )
-            files.append(discord.File(io.BytesIO(png), filename="heatmap.png"))
-            embed.set_image(url="attachment://heatmap.png")
+            embed.description = f"**Last Data Update:** <t:{int(data.updated)}:R>"
+            embed.set_footer(text=resolved.upper())
+            await interaction.followup.send(embed=embed)
+            return
 
-        await interaction.followup.send(embed=embed, files=files)
+        selections = self._selections(timing, event_name)
+        world_link = len(selections) > 1  # only world-link events have chapters
+        state = _HeatmapState(
+            resolved=resolved,
+            tz=tz,
+            tz_label=tz_label,
+            tz_overridden=tz_overridden,
+            data=data,
+            mode=mode,
+            key=key,
+            label=label,
+            event_name=event_name,
+            event_id=data.event_id,  # type: ignore[arg-type]
+            username=username,
+            thumb_png=thumb_png,
+            world_link=world_link,
+        )
+        embed, file = await _render_selection(state, selections[0])
+        view = (
+            _HeatmapView(state, selections, restrict_to=interaction.user.id)
+            if world_link
+            else None
+        )
+        await interaction.followup.send(
+            embed=embed, files=[file], view=view or discord.utils.MISSING
+        )
+        if view is not None:
+            view.message = await interaction.original_response()
 
     async def _user_identity(
         self, resolved: str, user_id: int, data: CurrentEventResponse
-    ) -> tuple[str | None, bytes | None, int | None]:
-        """(display name, leader-card thumbnail png, current rank) for a tracked player.
-        current rank comes from the freshest live top 100; the name and thumbnail from
-        their profile, falling back to the live ranking row's name if it can't be fetched.
+    ) -> tuple[str | None, bytes | None]:
+        """(display name, leader-card thumbnail png) for a tracked player: name and thumbnail
+        from their profile, falling back to the live ranking row's name if it can't be fetched.
         """
-        current_rank: int | None = None
         row_name: str | None = None
         for row in (data.top_100 or {}).get("rankings", []):
             if str(row.get("userId")) == str(user_id):
-                current_rank = row.get("rank")
                 row_name = row.get("name")
                 break
 
@@ -230,7 +422,7 @@ class HeatmapCog(commands.Cog):
                 thumb = await info._leader_thumbnail_bytes(profile)
         except Exception:
             pass
-        return username or row_name, thumb, current_rank
+        return username or row_name, thumb
 
     @heatmap_group.command(
         name="cutoff",
@@ -267,7 +459,7 @@ class HeatmapCog(commands.Cog):
                 )
             )
             return
-        await self._render_heatmap(
+        await self._send_heatmap(
             interaction,
             resolved,
             tz,
@@ -321,8 +513,8 @@ class HeatmapCog(commands.Cog):
             )
             return
         uid = int(user_id)
-        username, thumb, current_rank = await self._user_identity(resolved, uid, data)
-        await self._render_heatmap(
+        username, thumb = await self._user_identity(resolved, uid, data)
+        await self._send_heatmap(
             interaction,
             resolved,
             tz,
@@ -332,7 +524,6 @@ class HeatmapCog(commands.Cog):
             "user",
             uid,
             "",
-            current_rank=current_rank,
             username=username,
             thumb_png=thumb,
         )

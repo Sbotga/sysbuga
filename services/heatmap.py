@@ -172,6 +172,8 @@ def _series_and_coverage(
     key: int,
     tz: datetime.tzinfo,
     day_one: datetime.date,
+    chapter_cid: int | None = None,
+    chapter: bool = False,
 ) -> tuple[
     dict[tuple[int, int], int],
     list[int],
@@ -201,13 +203,22 @@ def _series_and_coverage(
             continue
         ts_ms = int(dt.timestamp() * 1000)
         fetch_times.append(ts_ms)
+        # a world-link chapter tracks its own sub-ranking (matched by focus character);
+        # otherwise the overall event top 100
+        if chapter:
+            rows = next(
+                (
+                    c.get("rankings") or []
+                    for c in ranking.get("userWorldBloomChapterRankings", [])
+                    if c.get("gameCharacterId") == chapter_cid
+                ),
+                [],
+            )
+        else:
+            rows = ranking.get("rankings", [])
         field = "rank" if mode == "cutoff" else "userId"
         score = next(
-            (
-                row.get("score")
-                for row in ranking.get("rankings", [])
-                if row.get(field) == key
-            ),
+            (row.get("score") for row in rows if row.get(field) == key),
             None,
         )
         local = dt.astimezone(tz)
@@ -274,12 +285,18 @@ def render_heatmap(
     current_rank: int | None = None,
     username: str | None = None,
     thumb_png: bytes | None = None,
+    section: str | None = None,
+    chapter_cid: int | None = None,
+    chapter: bool = False,
 ) -> bytes:
     """render the games-per-hour heatmap (start_at/end_at/now are epoch ms). PNG bytes.
     mode "cutoff" tracks rank `key`; mode "user" tracks user id `key` (and can show ND/N+).
     `tz_overridden` is True when the user forced the timezone via the command option.
     In user mode, `current_rank`/`username`/`thumb_png` drive the "Currently T.." subtitle
     and the player name + leader-card thumbnail shown in the top-right header.
+    `section` (world-link only) is drawn as a second title line - the chapter name or
+    "Overall". When `chapter` is set, a world-link chapter's sub-ranking is tracked (matched
+    by focus character `chapter_cid`) over the chapter's own start/end window.
     """
     start_dt = datetime.datetime.fromtimestamp(start_at / 1000, tz)
     end_dt = datetime.datetime.fromtimestamp(end_at / 1000, tz)
@@ -289,7 +306,7 @@ def render_heatmap(
     num_days = max(1, (end_dt.date() - day_one).days + 1)
 
     games, fetch_times, present, absent = _series_and_coverage(
-        snapshots, mode, key, tz, day_one
+        snapshots, mode, key, tz, day_one, chapter_cid, chapter
     )
     merged = _covered_intervals(fetch_times)
     is_user = mode == "user"
@@ -352,7 +369,9 @@ def render_heatmap(
     day_axis_w = 30 * _SCALE  # rotated "Day" label on the far left
     left = 168 * _SCALE  # day-label column
     heading_h = 42 * _SCALE  # the overall title
+    section_h = 42 * _SCALE if section else 0  # the chapter/"Overall" line (world link)
     subtitle_h = 28 * _SCALE if subtitle else 0  # the "Currently T.." line (user mode)
+    header_h = heading_h + section_h + subtitle_h  # the whole title block
     axis_h = 24 * _SCALE  # the "Hour" axis title
     hours_h = 22 * _SCALE  # the 0-24 hour numbers
     footer_gap = 20 * _SCALE  # padding between the grid and the footer
@@ -363,7 +382,7 @@ def render_heatmap(
     bar_label_w = 46 * _SCALE  # colorbar tick numbers
 
     grid_left = pad + day_axis_w + left
-    grid_top = pad + heading_h + subtitle_h + axis_h + hours_h
+    grid_top = pad + header_h + axis_h + hours_h
     grid_h = num_days * cell
     grid_bottom = grid_top + grid_h
     grid_right = grid_left + 24 * cell
@@ -378,7 +397,7 @@ def render_heatmap(
     name_font = ImageFont.truetype(_FONT_BOLD, 18 * _SCALE)
 
     # user mode: a leader-card thumbnail + player name pinned to the top-right header band
-    thumb_sz = heading_h + subtitle_h  # square, spans the title + subtitle height
+    thumb_sz = header_h  # square, spans the whole title block
     name_gap = 12 * _SCALE
     show_panel = is_user and bool(username or thumb_png)
     panel_w = 0
@@ -389,6 +408,8 @@ def render_heatmap(
             panel_w += int(name_font.getlength(username)) + name_gap
 
     title_w = int(heading_font.getlength(title))
+    if section:
+        title_w = max(title_w, int(heading_font.getlength(section)))
     right_edge = grid_right + bar_gap + bar_w + bar_label_w + pad
     header_w = pad + title_w + (pad + panel_w if panel_w else 0) + pad
     width = max(right_edge, header_w)
@@ -470,18 +491,24 @@ def render_heatmap(
     # overall title, top-left and larger
     draw.text((pad, pad), title, font=heading_font, fill=_TEXT, anchor="la")
 
+    # world link: the chapter name / "Overall" as a second title line (same font + size)
+    if section:
+        draw.text(
+            (pad, pad + heading_h), section, font=heading_font, fill=_TEXT, anchor="la"
+        )
+
     # user mode: the leaderboard-standing subtitle under the title, and the player
     # name + leader-card thumbnail pinned to the top-right (like the ISV deck header)
     if subtitle:
         draw.text(
-            (pad, pad + heading_h),
+            (pad, pad + heading_h + section_h),
             subtitle,
             font=subtitle_font,
             fill=subtitle_color,
             anchor="la",
         )
     if show_panel:
-        band_mid = pad + (heading_h + subtitle_h) / 2
+        band_mid = pad + header_h / 2
         x = width - pad
         if thumb_png:
             try:
@@ -499,7 +526,7 @@ def render_heatmap(
 
     # "Hour" axis title, centered over the columns
     draw.text(
-        ((grid_left + grid_right) / 2, pad + heading_h),
+        ((grid_left + grid_right) / 2, pad + header_h),
         "Hour",
         font=axis_font,
         fill=_TEXT,

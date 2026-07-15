@@ -161,12 +161,8 @@ class SummaryCog(commands.Cog):
                 )
                 return
 
-            counts: dict[str, int] = {}
-            for music in self.bot.pjsk.musics():  # type: ignore[union-attr]
-                if self.bot.pjsk.is_music_limited(music.id):  # type: ignore[union-attr]
-                    continue  # limited-time songs aren't counted in the totals
-                for d in music.difficulties:
-                    counts[d.difficulty] = counts.get(d.difficulty, 0) + 1
+            # region-only totals, never leaks, minus limited-time songs (see the footer note)
+            counts = self.bot.pjsk.region_difficulty_counts(region)  # type: ignore[union-attr]
 
             img = await unblock.to_process_with_timeout(
                 _build_image,

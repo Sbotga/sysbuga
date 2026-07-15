@@ -236,6 +236,12 @@ class PJSKData:
     def get_music(self, music_id: int) -> Music | None:
         return self._merged_music().get(music_id)
 
+    def region_music(self, region: str, music_id: int) -> Music | None:
+        """one region's copy of a song, carrying that region's own published_at (or None)"""
+        return next(
+            (m for m in self._music_cache.get(region, []) if m.id == music_id), None
+        )
+
     def _music_publish_map(self) -> dict[int, int]:
         """song id -> earliest release timestamp across every region"""
         out: dict[int, int] = {}
@@ -272,12 +278,42 @@ class PJSKData:
         """true if the song is a limited-time music (not counted toward the /summary totals)"""
         return music_id in self._limited_music_ids
 
+    def region_difficulty_counts(self, region: str) -> dict[str, int]:
+        """per-difficulty song count for one region's /summary totals: only songs released in
+        that region (never leaks), minus limited-time songs. append is region-gated on its own
+        since each region's music carries only the difficulties actually present there.
+        """
+        now = int(time.time() * 1000)
+        counts: dict[str, int] = {}
+        for m in self._music_cache.get(region, []):
+            if m.published_at > now:
+                continue  # not out in this region yet (a leak / unreleased)
+            if self.is_music_limited(m.id):
+                continue  # limited-time songs aren't counted in the totals
+            for d in m.difficulties:
+                counts[d.difficulty] = counts.get(d.difficulty, 0) + 1
+        return counts
+
     def regions_for_music(self, music_id: int) -> list[str]:
         return [
             r
             for r in self.regions
             if any(m.id == music_id for m in self._music_cache.get(r, []))
         ]
+
+    def append_regions_for_music(self, music_id: int) -> list[str]:
+        """regions whose copy of this song carries an append chart (parallels
+        regions_for_music) — append rolls out per region separately from the song itself
+        """
+        out: list[str] = []
+        for r in self.regions:
+            for m in self._music_cache.get(r, []):
+                if m.id == music_id and any(
+                    d.difficulty == "append" for d in m.difficulties
+                ):
+                    out.append(r)
+                    break
+        return out
 
     def events(self) -> list[Event]:
         return list(self._merged_events().values())

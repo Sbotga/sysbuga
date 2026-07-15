@@ -472,6 +472,14 @@ class SongInfo(commands.Cog):
         lines = [
             f"**Server Availability:** `{', '.join(r.upper() for r in regions) or 'None'}`"
         ]
+        # append rolls out per region on its own — and since EN wins the merge, a JP-only
+        # append won't be in music.difficulties, so key off the region list, not diff_map
+        append_regions = self.bot.pjsk.append_regions_for_music(music.id)  # type: ignore[union-attr]
+        if append_regions:
+            lines.append(
+                "**Append Server Availability:** "
+                f"`{', '.join(r.upper() for r in append_regions)}`"
+            )
         lines.append(f"**ID:** `{music.id}`")
         if bpms:
             lines.append(f"**BPM:** `{' - '.join(f'{b:g}' for b in bpms)}`")

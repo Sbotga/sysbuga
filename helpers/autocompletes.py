@@ -188,6 +188,38 @@ class Autocompletes:
         # public: leaks are hidden here
         return self._list_events(current, include_leaks=False)
 
+    async def pjsk_gacha(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        if not self.pjsk:
+            return []
+        # gacha ids are per-region, so list the region the user picked (resolving "default")
+        region = getattr(interaction.namespace, "region", None) or "default"
+        if region not in ("en", "jp", "tw", "kr"):
+            try:
+                region = await interaction.client.user_data.get_settings(  # type: ignore[attr-defined]
+                    interaction.user.id, "default_region"
+                )
+            except Exception:
+                region = "en"
+        if region not in ("en", "jp", "tw", "kr"):
+            region = "en"
+        cur = current.strip().lower()
+        gachas = sorted(
+            self.pjsk.gachas(region), key=lambda g: g.start_at or 0, reverse=True
+        )
+        out: list[app_commands.Choice[str]] = []
+        for g in gachas:
+            if not cur or cur in g.name.lower() or cur in str(g.id):
+                out.append(
+                    app_commands.Choice(
+                        name=f"({g.id}) {g.name}"[:100], value=str(g.id)
+                    )
+                )
+            if len(out) >= 25:
+                break
+        return out
+
     async def pjsk_character(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
