@@ -293,17 +293,11 @@ class GachaCog(commands.Cog):
                     if style == "3rd":
                         # 3rd anni tiles show the full untrained card illustration
                         return await fetch(card.card_url_normal)
-                    # 1st anni: the trimmed member cutout (the square bust the tile expects);
-                    # it 404s for most non-1st-anni cards, so fall back to the (also square)
-                    # untrained thumbnail - the same asset the LeaderCardImage sekai-image uses.
-                    trm = (
-                        card.cutout_url_normal.replace(
-                            "/member_cutout/", "/member_cutout_trm/"
-                        )
-                        if card.cutout_url_normal
-                        else None
+                    # 1st anni: the near-square member cutout the original Sbotga gacha used,
+                    # falling back to the (also square) untrained thumbnail if it's missing.
+                    return await fetch(card.cutout_url_normal) or await fetch(
+                        card.thumbnail_url_normal
                     )
-                    return await fetch(trm) or await fetch(card.thumbnail_url_normal)
 
                 arts = await asyncio.gather(*(fetch_art(c) for c in cards))
             if any(a is None for a in arts):
