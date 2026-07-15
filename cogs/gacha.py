@@ -228,7 +228,8 @@ class _RerollView(SbugaView):
             await interaction.response.defer()
             return
         self._busy = True
-        # swap to a loading state immediately so it's clear something is happening
+        # swap to a loading state (buttons disabled) immediately so it's clear it's working
+        self._disable_all()
         await interaction.response.edit_message(
             embed=embeds.embed(
                 title=f"Ten Pull - {self.gacha.name}", description="🔁 Rerolling..."
@@ -240,13 +241,17 @@ class _RerollView(SbugaView):
             result = await self.cog._pull_result(
                 self.gacha, self.region, self.style, self.force_four_star
             )
-            if result is not None:
-                embed, file = result
-                await interaction.edit_original_response(
-                    embed=embed, attachments=[file] if file else [], view=self
-                )
         finally:
             self._busy = False
+            self._enable_all()
+        embed, file = (
+            result
+            if result
+            else (embeds.error_embed("Couldn't reroll this banner."), None)
+        )
+        await interaction.edit_original_response(
+            embed=embed, attachments=[file] if file else [], view=self
+        )
 
 
 class GachaCog(commands.Cog):

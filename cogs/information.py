@@ -486,7 +486,8 @@ class _ISVView(SbugaView):
     ) -> None:
         if await self._not_author(interaction):
             return
-        # swap to a loading state immediately so it's clear something is happening
+        # swap to a loading state (buttons disabled) immediately so it's clear it's working
+        self._disable_all()
         await interaction.response.edit_message(
             embed=embeds.embed(
                 title=f"{self.data.username} - ISV", description="🔄 Refreshing..."
@@ -499,6 +500,7 @@ class _ISVView(SbugaView):
                 self.user_id, self.region, self.data.is_self, fresh=True
             )
         except SbugaNotFound:
+            self._enable_all()
             await interaction.edit_original_response(
                 embed=embeds.error_embed(
                     f"Couldn't find that profile in the {self.region.upper()} server."
@@ -507,11 +509,13 @@ class _ISVView(SbugaView):
             )
             return
         except SbugaError as e:
+            self._enable_all()
             await interaction.edit_original_response(
                 embed=embeds.error_embed(f"Couldn't refresh: {e.detail or e.status}"),
                 view=self,
             )
             return
+        self._enable_all()
         embed, files = await self.render()
         await interaction.edit_original_response(
             embed=embed, attachments=files, view=self

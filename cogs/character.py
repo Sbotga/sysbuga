@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+import time
 from typing import TYPE_CHECKING
 
 import discord
@@ -15,21 +17,29 @@ from helpers.views import SbugaView
 if TYPE_CHECKING:
     from main import SbugaBot
 
-PROFILE_FIELDS = [
-    ("unit", "Unit"),
-    ("support_unit", "Support Unit"),
-    ("gender", "Gender"),
-    ("height", "Height"),
-    ("birthday", "Birthday"),
-    ("school", "School"),
-    ("school_year", "School Year"),
-    ("hobby", "Hobby"),
-    ("special_skill", "Special Skill"),
-    ("favorite_food", "Favorite Food"),
-    ("hated_food", "Hated Food"),
-    ("weak_point", "Weak Point"),
-    ("voice_actor", "Voice Actor"),
-]
+_UNIT_NAMES = {
+    "light_sound": "Leo/need",
+    "idol": "MORE MORE JUMP!",
+    "street": "Vivid BAD SQUAD",
+    "theme_park": "Wonderlands×Showtime",
+    "school_refusal": "Nightcord at 25:00",
+    "piapro": "VIRTUAL SINGER",
+    "vocaloid": "VIRTUAL SINGER",
+}
+
+
+def _char_name(char: Character) -> str:
+    """Display name: given + family, reversed for Virtual Singers, no title-casing (so MEIKO
+    stays MEIKO)."""
+    if char.first_name and char.unit != "piapro":
+        return f"{char.given_name} {char.first_name}"
+    if char.first_name:
+        return f"{char.first_name} {char.given_name}"
+    return char.given_name
+
+
+def _unit_name(unit: str | None) -> str:
+    return _UNIT_NAMES.get(unit or "", unit or "?")
 
 
 class CharactersCog(commands.Cog):
@@ -59,22 +69,79 @@ class CharactersCog(commands.Cog):
             )
             return
 
+        card = self._random_card(char_obj.id)
+        image_url = card.card_url_normal if card else None
+        footer = self.bot.pjsk.card_display_name(card) if card else None  # type: ignore[union-attr]
+        embed = self._info_embed(char_obj, image_url, footer)
+        view = CharacterInfoView(
+            self, char_obj, image_url, footer, restrict_to=interaction.user.id
+        )
+        await interaction.followup.send(embed=embed, view=view)
+        view.message = await interaction.original_response()
+
+    def _random_card(self, character_id: int) -> Card | None:
+        """A random already-released 3★/4★/birthday card of the character, for the big art."""
+        now = int(time.time() * 1000)
+        pool = [
+            c
+            for c in self.bot.pjsk.cards()  # type: ignore[union-attr]
+            if c.character_id == character_id
+            and c.card_rarity_type in ("rarity_3", "rarity_4", "rarity_birthday")
+            and c.card_url_normal
+            and (c.release_at is None or c.release_at <= now)
+        ]
+        return random.choice(pool) if pool else None
+
+    def _info_embed(
+        self, char: Character, image_url: str | None, footer: str | None
+    ) -> discord.Embed:
+        embed = embeds.embed(title=_char_name(char), color=discord.Color.teal())
+        header = f"**{_unit_name(char.unit)}**"
+        if char.support_unit:
+            header += (
+                f"\n**Support Unit:** {char.support_unit.replace('_', ' ').title()}"
+            )
+        mid = ""
+        if char.voice_actor:
+            mid += f"**Voice Actor:** {char.voice_actor}\n"
+        if char.birthday:
+            mid += f"**Birthday:** `{char.birthday.replace('.', ' ')}`"
+        body = ""
+        if char.gender:
+            body += f"**Gender:** {char.gender.capitalize()}\n"
+        if char.height:
+            body += f"**Height:** {char.height}\n-# Height as of third anniversary."
+        desc = "\n\n".join(p for p in (header, mid.rstrip(), body.rstrip()) if p)
+        if char.school:
+            year = char.school_year if char.school_year not in (None, "-") else "N/A"
+            desc += f"\n\n**School:** {char.school.replace('HS', 'High School')} (Year {year})"
+        embed.description = desc
+        if image_url:
+            embed.set_image(url=image_url)
+        if footer:
+            embed.set_footer(text=footer)
+        return embed
+
+    def _profile_embed(
+        self, char: Character, image_url: str | None, footer: str | None
+    ) -> discord.Embed:
         embed = embeds.embed(
-            title=character_display_name(char_obj), color=discord.Color.blurple()
+            title=f"{_char_name(char)} Profile", color=discord.Color.teal()
         )
-        for attr, label in PROFILE_FIELDS:
-            value = getattr(char_obj, attr, None)
-            if value:
-                embed.add_field(name=label, value=value, inline=True)
-        if char_obj.introduction:
-            embed.description = char_obj.introduction
-        thumb = next(
-            (c.thumbnail_url_normal for c in self.bot.pjsk.cards() if c.character_id == char_obj.id and c.thumbnail_url_normal),  # type: ignore[union-attr]
-            None,
+        embed.description = (
+            f"**{_unit_name(char.unit)}**\n\n"
+            f"**Hobbies:** {char.hobby}\n"
+            f"**Special Skills:** {char.special_skill}\n"
+            f"**Dislikes:** {char.weak_point}\n"
+            f"**Hated Food:** {char.hated_food}\n"
+            f"**Favorite Food:** {char.favorite_food}\n\n"
+            f"**Introduction**\n```\n{char.introduction}\n```"
         )
-        if thumb:
-            embed.set_thumbnail(url=thumb)
-        await interaction.followup.send(embed=embed)
+        if image_url:
+            embed.set_image(url=image_url)
+        if footer:
+            embed.set_footer(text=footer)
+        return embed
 
     @char.command(name="card", description="View a PJSK card's art.")
     @app_commands.autocomplete(card=autocompletes.pjsk_card)
@@ -115,6 +182,39 @@ class CharactersCog(commands.Cog):
             (c for c in self.bot.pjsk.characters() if q in character_display_name(c).lower().replace(" ", "")),  # type: ignore[union-attr]
             None,
         )
+
+
+class CharacterInfoView(SbugaView):
+    """Toggles the character embed between the Info page and the Profile page, reusing the
+    same randomly-picked card art across both (command invoker only)."""
+
+    def __init__(
+        self,
+        cog: CharactersCog,
+        char: Character,
+        image_url: str | None,
+        footer: str | None,
+        restrict_to: int,
+    ) -> None:
+        super().__init__(restrict_to=restrict_to)
+        self.cog = cog
+        self.char = char
+        self.image_url = image_url
+        self.footer = footer
+        self.profile = False
+
+    @discord.ui.button(label="View Profile", style=discord.ButtonStyle.primary)
+    async def toggle(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self.profile = not self.profile
+        button.label = "Back" if self.profile else "View Profile"
+        embed = (
+            self.cog._profile_embed(self.char, self.image_url, self.footer)
+            if self.profile
+            else self.cog._info_embed(self.char, self.image_url, self.footer)
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
 
 
 class CardTrainedView(SbugaView):

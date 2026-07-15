@@ -12,6 +12,8 @@ class SbugaView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.message: discord.Message | None = None
         self.restrict_to = restrict_to
+        # items the last _disable_all() turned off, so _enable_all() restores exactly those
+        self._prev_enabled: list[discord.ui.Button | discord.ui.Select] = []
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if self.restrict_to is not None and interaction.user.id != self.restrict_to:
@@ -23,9 +25,23 @@ class SbugaView(discord.ui.View):
         return True
 
     def _disable_all(self) -> None:
-        for item in self.children:
-            if isinstance(item, (discord.ui.Button, discord.ui.Select)):
-                item.disabled = True
+        """Disable every button/select, remembering which were enabled beforehand so a paired
+        _enable_all() re-enables exactly those (leaving already-disabled ones disabled).
+        """
+        self._prev_enabled = [
+            item
+            for item in self.children
+            if isinstance(item, (discord.ui.Button, discord.ui.Select))
+            and not item.disabled
+        ]
+        for item in self._prev_enabled:
+            item.disabled = True
+
+    def _enable_all(self) -> None:
+        """Re-enable only the items the last _disable_all() disabled."""
+        for item in self._prev_enabled:
+            item.disabled = False
+        self._prev_enabled = []
 
     async def on_timeout(self) -> None:
         self._disable_all()
