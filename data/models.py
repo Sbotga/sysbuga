@@ -188,6 +188,8 @@ class Card(BaseModel):
     id: int
     character_id: int
     card_rarity_type: str
+    skill_id: int | None = None
+    special_training_skill_id: int | None = None
     attr: str | None = None
     support_unit: str | None = None
     prefix: str = ""
@@ -198,6 +200,8 @@ class Card(BaseModel):
     card_url_trained: str | None = None
     cutout_url_normal: str | None = None
     cutout_url_trained: str | None = None
+    deck_cutout_url_normal: str | None = None
+    deck_cutout_url_trained: str | None = None
     thumbnail_url_normal: str | None = None
     thumbnail_url_trained: str | None = None
     frame_rarity: str | None = None

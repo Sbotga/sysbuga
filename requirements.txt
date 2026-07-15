@@ -36,6 +36,9 @@ pinyin-jyutping==0.9
 pillow
 numpy
 
+# leader/deck card thumbnail rendering (framed card art for profiles)
+sekai-images @ git+https://github.com/YumYummity/sekai-images
+
 # Console
 colorama
 

@@ -10,13 +10,22 @@ and event_saves.
 """
 
 import asyncio
+import logging
 import signal
+import time
 
 from helpers.config_loader import get_config, set_config_path
 from services import event_store
 from services.sbuga import SbugaClient
 
 POLL_SECONDS = 60
+FETCH_RETRIES = 3  # a missed minute leaves a real gap in the heatmap, so retry hard
+RETRY_DELAY = 3.0
+FETCH_TIMEOUT = (
+    45.0  # a live leaderboard fetch is slow; give it room but still retry if it hangs
+)
+
+logger = logging.getLogger("event-worker")
 
 
 class EventWorker:
@@ -25,15 +34,35 @@ class EventWorker:
         self._last_event: dict[str, int] = {}  # region -> last seen event id
         self._did_startup_sweep = False
 
+    async def _fetch_current(self, region: str):
+        """fetch this region's current event, retrying on failure. each failure is a warning
+        (a missed minute is a permanent hole in the data). None if every attempt failed.
+        """
+        for attempt in range(1, FETCH_RETRIES + 1):
+            try:
+                return await asyncio.wait_for(
+                    self.client.get_current_event(region, fresh=True), FETCH_TIMEOUT
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[%s] fetch failed (attempt %d/%d): %r",
+                    region,
+                    attempt,
+                    FETCH_RETRIES,
+                    exc,
+                )
+                if attempt < FETCH_RETRIES:
+                    await asyncio.sleep(RETRY_DELAY)
+        return None
+
     async def _poll_region(self, region: str) -> None:
-        try:
-            data = await self.client.get_current_event(region, fresh=True)
-        except Exception:
-            return  # api hiccup - keep the last good file for this region
+        data = await self._fetch_current(region)
+        if data is None:
+            return  # every retry failed - keep the last good file for this region
         try:
             await asyncio.to_thread(event_store.store_current_event, region, data)
         except Exception as exc:
-            print(f"[event-worker] [{region}] store failed: {exc!r}", flush=True)
+            logger.warning("[%s] store failed: %r", region, exc)
 
         event_id = data.event_id
         if event_id is None:
@@ -55,9 +84,7 @@ class EventWorker:
             pass  # the startup sweep / retro script will finish it later
 
     async def run(self) -> None:
-        loop = asyncio.get_running_loop()
         while True:
-            started = loop.time()
             try:
                 await asyncio.gather(
                     *(self._poll_region(r) for r in event_store.EVENT_REGIONS),
@@ -72,11 +99,17 @@ class EventWorker:
                         asyncio.to_thread(event_store.compress_stale_event_saves)
                     )
             except Exception as exc:  # never let a stray error stop the loop
-                print(f"[event-worker] iteration failed: {exc!r}", flush=True)
-            await asyncio.sleep(max(0.0, POLL_SECONDS - (loop.time() - started)))
+                logger.warning("iteration failed: %r", exc)
+            # align every poll to the top of the wall-clock minute (:00), not to when the
+            # service happened to start, so snapshots land on consistent minute boundaries
+            await asyncio.sleep(POLL_SECONDS - (time.time() % POLL_SECONDS))
 
 
 async def _run() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [event-worker] %(message)s",
+    )
     set_config_path("config.yml")
     scfg = get_config()["sbuga"]
     client = SbugaClient(

@@ -144,6 +144,8 @@ def build_cards(cards: list[dict[str, Any]], asset_url: AssetUrl) -> list[Card]:
                 id=c["id"],
                 character_id=c["characterId"],
                 card_rarity_type=c["cardRarityType"],
+                skill_id=c.get("skillId"),
+                special_training_skill_id=c.get("specialTrainingSkillId"),
                 attr=c.get("attr"),
                 support_unit=None if support in (None, "none") else support,
                 prefix=c.get("prefix", ""),
@@ -157,10 +159,24 @@ def build_cards(cards: list[dict[str, Any]], asset_url: AssetUrl) -> list[Card]:
                     else None
                 ),
                 # member_cutout, not member_cutout_trm: the trimmed variant only ships
-                # for ~700 of the 1405 cards, so newer ones 404.
-                cutout_url_normal=asset_url(f"character/member_cutout/{abn}/normal"),
+                # for ~700 of the 1405 cards, so newer ones 404. sprites live under
+                # normal/ and after_training/ subfolders (one per training state).
+                cutout_url_normal=asset_url(
+                    f"character/member_cutout/{abn}/normal/normal"
+                ),
                 cutout_url_trained=(
-                    asset_url(f"character/member_cutout/{abn}/after_training")
+                    asset_url(
+                        f"character/member_cutout/{abn}/after_training/after_training"
+                    )
+                    if trainable
+                    else None
+                ),
+                # the deck-shaped crop (312x512), one per training state
+                deck_cutout_url_normal=asset_url(
+                    f"character/member_cutout/{abn}/normal/deck"
+                ),
+                deck_cutout_url_trained=(
+                    asset_url(f"character/member_cutout/{abn}/after_training/deck")
                     if trainable
                     else None
                 ),

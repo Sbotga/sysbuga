@@ -1,13 +1,19 @@
-"""Event games-per-hour heatmap for a tier (rows = days, columns = the 24 hours of the day).
+"""Event games-per-hour heatmap (rows = days, columns = the 24 hours of the day).
 
-Inspired by RoboNene's /heatmap. Each in-event, already-elapsed hour shows how many "games" the
-tier played that hour - a game being any rise in its event points (even +1), attributed to the
-hour we first see the higher score (RoboNene's rule). Cells:
-  - a gradient-colored games count (white-clamped at 32) for an hour with good data coverage,
-  - the same plus a yellow star when a few fetches were missed (possibly a little off),
-  - "ND" in red when over half the hour's fetches were missed (not trustworthy),
+Two modes: "cutoff" tracks a tier (rank position), "user" tracks a specific player. Each in-event,
+already-elapsed hour shows how many "games" were played - a game being any rise in event points
+(even +1), attributed to the hour we first see the higher score (RoboNene's rule). Cells:
+  - a gradient-colored games count (white-clamped at 32) for an hour with good coverage,
+  - a light-blue "+" (user mode): they were off the top 100 part of the hour, so may have more
+    games we couldn't see - the count is a floor ("N+"),
+  - a yellow "*": partial data (PD) - a real fetch gap, so the count may be a little off,
+  - "MD" in red: missing data - our fetches failed for most of the hour,
+  - "ND" (user mode, soft color): no data - we fetched all hour but they weren't on the top 100,
   - blank for an in-event hour still in the future,
   - a red X for an hour outside the event (before it starts or after it ends).
+
+Coverage is gap-based (not per-minute), so normal poll drift near 60s doesn't get flagged; only a
+real gap of more than ~2 minutes between consecutive fetches counts as missing.
 
 Hours/days are bucketed in a chosen timezone (default Eastern), shown in the corner of the image.
 """
@@ -121,8 +127,19 @@ _GRADIENT = [
 ]
 # the gradient spans 0 (dark) to this count (white); higher counts clamp to the white end
 _WHITE_POINT = 32
-_ND_FILL = (38, 30, 32, 255)  # a cell with too little data to trust ("ND")
-_FLAG_YELLOW = (255, 205, 70, 255)  # the footer asterisk + warning text color
+# red + yellow are reserved for OUR fault (a failed fetch): MD (missing) and PD (partial)
+_MD_FILL = (48, 24, 27, 255)  # "MD" cell - our fetches failed for most of the hour
+_MD_TEXT = (214, 68, 78, 255)
+_FLAG_YELLOW = (255, 205, 70, 255)  # PD asterisk + its footer note
+# not our fault: N+ (off-lb part of the hour) light blue, ND (off-lb all hour) a soft color
+_NPLUS_BLUE = (96, 176, 240, 255)
+_ND_CELL = (28, 31, 40, 255)
+_ND_TEXT = (150, 162, 200, 255)
+
+# coverage is gap-based: each fetch "covers" +-_COVER_MS, so consecutive fetches up to ~2x that
+# apart stay contiguous (normal poll drift is fine). only larger gaps count as missing time.
+_COVER_MS = 60_000
+_PD_MISSING_MS = 120_000  # >2 min of genuine gap in an hour -> partial data (PD)
 
 
 def _gradient_at(t: float) -> tuple[int, int, int, int]:
@@ -148,16 +165,29 @@ def _text_on(rgb: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
     return (20, 20, 26, 255) if luminance > 150 else _TEXT
 
 
-def _tier_series_and_coverage(
-    snapshots: Iterable[dict], tier: int, tz: datetime.tzinfo, day_one: datetime.date
-) -> tuple[dict[tuple[int, int], int], dict[tuple[int, int], set[int]]]:
+def _series_and_coverage(
+    snapshots: Iterable[dict],
+    mode: str,
+    key: int,
+    tz: datetime.tzinfo,
+    day_one: datetime.date,
+) -> tuple[
+    dict[tuple[int, int], int],
+    list[int],
+    dict[tuple[int, int], int],
+    dict[tuple[int, int], int],
+]:
     """from the saved snapshots, build:
-    games[(day, hour)]   = how many times rank `tier`'s event points rose in that hour. any rise
-                           (even +1) is a game; a game is attributed to the hour we first observe
-                           the higher score (RoboNene's rule - the hour it finishes/ticks up)
-    covered[(day, hour)] = which minutes we actually have a fetch for (data coverage)
+    games[cell]   = how many times the tracked score rose in that hour (a game). mode "cutoff"
+                    tracks rank `key`'s points; mode "user" tracks user id `key`'s points.
+    fetch_times   = sorted ms timestamps of every snapshot (a snapshot = a successful fetch),
+                    used for gap-based coverage regardless of whether the target was present.
+    present[cell] = # of fetched snapshots the target appeared in (on the top 100 that minute)
+    absent[cell]  = # of fetched snapshots the target was NOT in (off the top 100 that minute)
     """
-    covered: dict[tuple[int, int], set[int]] = defaultdict(set)
+    fetch_times: list[int] = []
+    present: dict[tuple[int, int], int] = defaultdict(int)
+    absent: dict[tuple[int, int], int] = defaultdict(int)
     series: list[tuple[int, int]] = []
     for snap in snapshots:
         ranking = snap.get("ranking") or {}
@@ -168,20 +198,26 @@ def _tier_series_and_coverage(
             dt = datetime.datetime.fromisoformat(created)
         except ValueError:
             continue
+        ts_ms = int(dt.timestamp() * 1000)
+        fetch_times.append(ts_ms)
+        field = "rank" if mode == "cutoff" else "userId"
         score = next(
             (
                 row.get("score")
                 for row in ranking.get("rankings", [])
-                if row.get("rank") == tier
+                if row.get(field) == key
             ),
             None,
         )
-        if score is None:
-            continue  # fetched, but no data for this tier - counts as a missed minute
         local = dt.astimezone(tz)
-        covered[((local.date() - day_one).days, local.hour)].add(local.minute)
-        series.append((int(dt.timestamp() * 1000), score))
+        cell = ((local.date() - day_one).days, local.hour)
+        if score is None:
+            absent[cell] += 1
+        else:
+            present[cell] += 1
+            series.append((ts_ms, score))
 
+    fetch_times.sort()
     series.sort()
     games: dict[tuple[int, int], int] = defaultdict(int)
     last: int | None = None
@@ -190,22 +226,29 @@ def _tier_series_and_coverage(
             local = datetime.datetime.fromtimestamp(ts_ms / 1000, tz)
             games[((local.date() - day_one).days, local.hour)] += 1
         last = score
-    return games, covered
+    return games, fetch_times, present, absent
 
 
-def _missed_stats(m_lo: int, m_hi: int, covered: set[int]) -> tuple[int, int]:
-    """(minutes missed, longest run of consecutive missed minutes) over the [m_lo, m_hi) range"""
-    missed = 0
-    run = 0
-    longest = 0
-    for m in range(m_lo, m_hi):
-        if m in covered:
-            run = 0
+def _covered_intervals(fetch_times: list[int]) -> list[tuple[int, int]]:
+    """merge each fetch's +-_COVER_MS window into disjoint covered intervals (sorted input)."""
+    merged: list[tuple[int, int]] = []
+    for t in fetch_times:
+        s, e = t - _COVER_MS, t + _COVER_MS
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
         else:
-            missed += 1
-            run += 1
-            longest = max(longest, run)
-    return missed, longest
+            merged.append((s, e))
+    return merged
+
+
+def _missing_ms(merged: list[tuple[int, int]], lo: int, hi: int) -> int:
+    """ms of [lo, hi) not inside any covered interval (a real gap between fetches)."""
+    covered = 0
+    for s, e in merged:
+        a, b = max(s, lo), min(e, hi)
+        if b > a:
+            covered += b - a
+    return max(0, (hi - lo) - covered)
 
 
 def _rotated_text(text: str, font: ImageFont.FreeTypeFont) -> Image.Image:
@@ -225,9 +268,11 @@ def render_heatmap(
     tz_label: str,
     tz_overridden: bool,
     snapshots: Iterable[dict],
-    tier: int,
+    mode: str,
+    key: int,
 ) -> bytes:
-    """render the games-per-hour heatmap for a tier (start_at/end_at/now are epoch ms). PNG bytes.
+    """render the games-per-hour heatmap (start_at/end_at/now are epoch ms). PNG bytes.
+    mode "cutoff" tracks rank `key`; mode "user" tracks user id `key` (and can show ND/N+).
     `tz_overridden` is True when the user forced the timezone via the command option
     """
     start_dt = datetime.datetime.fromtimestamp(start_at / 1000, tz)
@@ -237,14 +282,19 @@ def render_heatmap(
     # cells - a cosmetic off-by-one twice a year. leaving it for now; revisit later.
     num_days = max(1, (end_dt.date() - day_one).days + 1)
 
-    games, covered = _tier_series_and_coverage(snapshots, tier, tz, day_one)
+    games, fetch_times, present, absent = _series_and_coverage(
+        snapshots, mode, key, tz, day_one
+    )
+    merged = _covered_intervals(fetch_times)
+    is_user = mode == "user"
 
-    # classify every cell up front (so we know whether to reserve footer legend lines)
+    # classify every cell up front (so we know whether to reserve footer legend lines).
+    # markers: MD/PD are our fault (fetch gaps); ND/N+ are the user being off the top 100.
     cells: dict[tuple[int, int], tuple] = {}
-    has_flag = False
-    has_nd = False
+    has_pd = has_md = has_nd = has_nplus = False
     for row in range(num_days):
         for hour in range(24):
+            cell = (row, hour)
             cell_dt = datetime.datetime.combine(
                 day_one + datetime.timedelta(days=row),
                 datetime.time(hour=hour),
@@ -253,26 +303,34 @@ def render_heatmap(
             cs = int(cell_dt.timestamp() * 1000)
             ce = cs + _HOUR_MS
             if ce <= start_at or cs >= end_at:
-                cells[(row, hour)] = ("outside",)
+                cells[cell] = ("outside",)
                 continue
             if cs > now:
-                cells[(row, hour)] = ("future",)
+                cells[cell] = ("future",)
                 continue
-            # how many of this hour's in-event, already-elapsed minutes we should have fetched
-            elapsed_end = min(ce, end_at, now)
-            m_lo = max(0, (max(cs, start_at) - cs) // 60000)
-            m_hi = min(60, -(-(elapsed_end - cs) // 60000))  # ceil-divide
-            missed, longest = _missed_stats(m_lo, m_hi, covered.get((row, hour), set()))
-            expected = m_hi - m_lo
-            count = games.get((row, hour), 0)
-            if expected > 0 and missed > expected / 2:
-                cells[(row, hour)] = ("nd",)  # over half missing - not trustworthy
+            # elapsed in-event window of this hour, and how much of it had no fetch coverage
+            lo = max(cs, start_at)
+            hi = min(ce, end_at, now)
+            window = max(1, hi - lo)
+            missing = _missing_ms(merged, lo, hi)
+            count = games.get(cell, 0)
+            if missing > window / 2:  # our fetches failed for most of the hour
+                cells[cell] = ("md",)
+                has_md = True
+                continue
+            if (
+                is_user and present.get(cell, 0) == 0
+            ):  # fetched all hour, never on the top 100
+                cells[cell] = ("nd",)
                 has_nd = True
-            elif missed > 3 or longest >= 2:
-                cells[(row, hour)] = ("flag", count)  # some gaps - mark maybe-off
-                has_flag = True
-            else:
-                cells[(row, hour)] = ("count", count)
+                continue
+            plus = (
+                is_user and absent.get(cell, 0) > 0
+            )  # off the top 100 part of the hour
+            pd = missing > _PD_MISSING_MS  # a real gap of a couple minutes
+            has_nplus = has_nplus or plus
+            has_pd = has_pd or pd
+            cells[cell] = ("count", count, plus, pd)
 
     cell = 34 * _SCALE
     day_axis_w = 30 * _SCALE  # rotated "Day" label on the far left
@@ -302,7 +360,7 @@ def render_heatmap(
 
     right_edge = grid_right + bar_gap + bar_w + bar_label_w + pad
     width = max(right_edge, int(pad + heading_font.getlength(title) + pad))
-    footer_lines = 1 + int(has_flag) + int(has_nd)
+    footer_lines = 1 + has_md + has_pd + has_nd + has_nplus
     height = grid_bottom + footer_gap + footer_h * footer_lines
 
     img = Image.new("RGBA", (width, height), _BG)
@@ -330,34 +388,42 @@ def render_heatmap(
                     fill=_X_LINE,
                     width=2 * _SCALE,
                 )
-            elif kind[0] == "nd":  # too much data missing
-                draw.rectangle(inner, fill=_ND_FILL)
+            elif kind[0] == "md":  # our fetches failed most of the hour
+                draw.rectangle(inner, fill=_MD_FILL)
+                draw.text(
+                    (x0 + cell / 2, y0 + cell / 2),
+                    "MD",
+                    font=zero_font,
+                    fill=_MD_TEXT,
+                    anchor="mm",
+                )
+            elif kind[0] == "nd":  # user, fetched all hour but never on the top 100
+                draw.rectangle(inner, fill=_ND_CELL)
                 draw.text(
                     (x0 + cell / 2, y0 + cell / 2),
                     "ND",
                     font=zero_font,
-                    fill=_X_LINE,
+                    fill=_ND_TEXT,
                     anchor="mm",
                 )
-            else:  # "count" or "flag" - a games figure, colored by the gradient
-                value = kind[1]
+            else:  # ("count", value, plus, pd) - a games figure, colored by the gradient
+                _, value, plus, pd = kind
                 fill = _color_for(value, _WHITE_POINT)
                 text_color = _text_on(fill)
                 draw.rectangle(inner, fill=fill)
                 draw.text(
                     (x0 + cell / 2, y0 + cell / 2),
-                    str(value),
+                    f"{value}+" if plus else str(value),
                     font=zero_font,
-                    fill=text_color,
+                    fill=_NPLUS_BLUE if plus else text_color,
                     anchor="mm",
                 )
-                if kind[0] == "flag":
-                    # asterisk top-right, in the cell's own text color so it stays readable
+                if pd:  # partial data - yellow asterisk, top-right
                     draw.text(
                         (x0 + cell - 4 * _SCALE, y0 + 2 * _SCALE),
                         "*",
                         font=flag_font,
-                        fill=text_color,
+                        fill=_FLAG_YELLOW,
                         anchor="ra",
                     )
 
@@ -439,23 +505,30 @@ def render_heatmap(
         note += " (configurable in user settings)"
     footer_y = grid_bottom + footer_gap
     draw.text((pad, footer_y), note, font=footer_font, fill=_MUTED, anchor="la")
-    if has_flag:
+
+    def footer_line(text: str, color: tuple[int, int, int, int]) -> None:
+        nonlocal footer_y
         footer_y += footer_h
-        draw.text(
-            (pad, footer_y),
-            "* Possibly inaccurate due to failed data fetch.",
-            font=footer_font,
-            fill=_FLAG_YELLOW,
-            anchor="la",
+        draw.text((pad, footer_y), text, font=footer_font, fill=color, anchor="la")
+
+    if has_md:
+        footer_line(
+            "MD - Missing data. Our fetches failed for most of this hour.", _MD_TEXT
+        )
+    if has_pd:
+        footer_line(
+            "* - Partial data. Some fetches failed, so this hour's count may be off.",
+            _FLAG_YELLOW,
+        )
+    if has_nplus:
+        footer_line(
+            "N+ - At least this many; they were not in the top 100 for part of this hour.",
+            _NPLUS_BLUE,
         )
     if has_nd:
-        footer_y += footer_h
-        draw.text(
-            (pad, footer_y),
-            "ND* No or extremely inaccurate data. Most of our data does not exist.",
-            font=footer_font,
-            fill=_X_LINE,
-            anchor="la",
+        footer_line(
+            "ND - No data. They were not in the top 100 for this hour.",
+            _ND_TEXT,
         )
 
     out = img.resize((width // _SCALE, height // _SCALE), Image.LANCZOS)
