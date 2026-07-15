@@ -281,12 +281,15 @@ class GachaCog(commands.Cog):
         return results
 
     def _resolve_style(self, region: str, gacha: Gacha, override: str) -> str:
-        """The result-screen style, '1st' or '3rd'. `override` forces it; 'auto' picks 3rd for
-        banners from NEO's (per-region) release onward, otherwise 1st."""
+        """The result-screen style, '1st' or '3rd'. `override` forces it; 'auto' picks 3rd once a
+        banner reaches NEO's (per-region) release - a banner that started before it but runs past
+        it has crossed into 3rd-anni territory too, so key off the end date - otherwise 1st.
+        """
         if override in ("1st", "3rd"):
             return override
         neo = self.bot.pjsk.region_music(region, _NEO_MUSIC_ID)  # type: ignore[union-attr]
-        if neo and (gacha.start_at or 0) >= neo.published_at:
+        end = gacha.end_at or gacha.start_at or 0
+        if neo and end >= neo.published_at:
             return "3rd"
         return "1st"
 
