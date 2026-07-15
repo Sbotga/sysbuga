@@ -135,6 +135,7 @@ _FLAG_YELLOW = (255, 205, 70, 255)  # PD asterisk + its footer note
 _NPLUS_BLUE = (96, 176, 240, 255)
 _ND_CELL = (28, 31, 40, 255)
 _ND_TEXT = (150, 162, 200, 255)
+_RANK_GREEN = (120, 200, 130, 255)  # "Currently T.." subtitle when the player is ranked
 
 # coverage is gap-based: each fetch "covers" +-_COVER_MS, so consecutive fetches up to ~2x that
 # apart stay contiguous (normal poll drift is fine). only larger gaps count as missing time.
@@ -270,10 +271,15 @@ def render_heatmap(
     snapshots: Iterable[dict],
     mode: str,
     key: int,
+    current_rank: int | None = None,
+    username: str | None = None,
+    thumb_png: bytes | None = None,
 ) -> bytes:
     """render the games-per-hour heatmap (start_at/end_at/now are epoch ms). PNG bytes.
     mode "cutoff" tracks rank `key`; mode "user" tracks user id `key` (and can show ND/N+).
-    `tz_overridden` is True when the user forced the timezone via the command option
+    `tz_overridden` is True when the user forced the timezone via the command option.
+    In user mode, `current_rank`/`username`/`thumb_png` drive the "Currently T.." subtitle
+    and the player name + leader-card thumbnail shown in the top-right header.
     """
     start_dt = datetime.datetime.fromtimestamp(start_at / 1000, tz)
     end_dt = datetime.datetime.fromtimestamp(end_at / 1000, tz)
@@ -287,6 +293,16 @@ def render_heatmap(
     )
     merged = _covered_intervals(fetch_times)
     is_user = mode == "user"
+
+    # user mode: a subtitle under the title showing where they sit on the live leaderboard
+    subtitle: str | None = None
+    subtitle_color = _MUTED
+    if is_user:
+        if current_rank:
+            subtitle = f"Currently T{current_rank}"
+            subtitle_color = _RANK_GREEN
+        else:
+            subtitle = "Not currently in leaderboards"
 
     # classify every cell up front (so we know whether to reserve footer legend lines).
     # markers: MD/PD are our fault (fetch gaps); ND/N+ are the user being off the top 100.
@@ -336,6 +352,7 @@ def render_heatmap(
     day_axis_w = 30 * _SCALE  # rotated "Day" label on the far left
     left = 168 * _SCALE  # day-label column
     heading_h = 42 * _SCALE  # the overall title
+    subtitle_h = 28 * _SCALE if subtitle else 0  # the "Currently T.." line (user mode)
     axis_h = 24 * _SCALE  # the "Hour" axis title
     hours_h = 22 * _SCALE  # the 0-24 hour numbers
     footer_gap = 20 * _SCALE  # padding between the grid and the footer
@@ -346,7 +363,7 @@ def render_heatmap(
     bar_label_w = 46 * _SCALE  # colorbar tick numbers
 
     grid_left = pad + day_axis_w + left
-    grid_top = pad + heading_h + axis_h + hours_h
+    grid_top = pad + heading_h + subtitle_h + axis_h + hours_h
     grid_h = num_days * cell
     grid_bottom = grid_top + grid_h
     grid_right = grid_left + 24 * cell
@@ -357,9 +374,24 @@ def render_heatmap(
     footer_font = ImageFont.truetype(_FONT_PATH, 13 * _SCALE)
     axis_font = ImageFont.truetype(_FONT_BOLD, 17 * _SCALE)
     heading_font = ImageFont.truetype(_FONT_BOLD, 24 * _SCALE)
+    subtitle_font = ImageFont.truetype(_FONT_BOLD, 15 * _SCALE)
+    name_font = ImageFont.truetype(_FONT_BOLD, 18 * _SCALE)
 
+    # user mode: a leader-card thumbnail + player name pinned to the top-right header band
+    thumb_sz = heading_h + subtitle_h  # square, spans the title + subtitle height
+    name_gap = 12 * _SCALE
+    show_panel = is_user and bool(username or thumb_png)
+    panel_w = 0
+    if show_panel:
+        if thumb_png:
+            panel_w += thumb_sz
+        if username:
+            panel_w += int(name_font.getlength(username)) + name_gap
+
+    title_w = int(heading_font.getlength(title))
     right_edge = grid_right + bar_gap + bar_w + bar_label_w + pad
-    width = max(right_edge, int(pad + heading_font.getlength(title) + pad))
+    header_w = pad + title_w + (pad + panel_w if panel_w else 0) + pad
+    width = max(right_edge, header_w)
     footer_lines = 1 + has_md + has_pd + has_nd + has_nplus
     height = grid_bottom + footer_gap + footer_h * footer_lines
 
@@ -437,6 +469,33 @@ def render_heatmap(
 
     # overall title, top-left and larger
     draw.text((pad, pad), title, font=heading_font, fill=_TEXT, anchor="la")
+
+    # user mode: the leaderboard-standing subtitle under the title, and the player
+    # name + leader-card thumbnail pinned to the top-right (like the ISV deck header)
+    if subtitle:
+        draw.text(
+            (pad, pad + heading_h),
+            subtitle,
+            font=subtitle_font,
+            fill=subtitle_color,
+            anchor="la",
+        )
+    if show_panel:
+        band_mid = pad + (heading_h + subtitle_h) / 2
+        x = width - pad
+        if thumb_png:
+            try:
+                thumb = (
+                    Image.open(io.BytesIO(thumb_png))
+                    .convert("RGBA")
+                    .resize((thumb_sz, thumb_sz), Image.LANCZOS)
+                )
+                img.alpha_composite(thumb, (x - thumb_sz, pad))
+                x -= thumb_sz + name_gap
+            except Exception:
+                pass
+        if username:
+            draw.text((x, band_mid), username, font=name_font, fill=_TEXT, anchor="rm")
 
     # "Hour" axis title, centered over the columns
     draw.text(

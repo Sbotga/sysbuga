@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import discord
 from discord import app_commands
@@ -16,6 +16,7 @@ from services.event_store import EVENT_REGIONS, iter_snapshots, read_current_eve
 from services.models import CurrentEventResponse
 
 if TYPE_CHECKING:
+    from cogs.information import InfoCog
     from main import SbugaBot
 
 _HEATMAP_MAX_TIER = 100  # heatmap only covers the top 100
@@ -150,11 +151,16 @@ class HeatmapCog(commands.Cog):
         mode: str,
         key: int,
         label: str,
+        *,
+        current_rank: int | None = None,
+        username: str | None = None,
+        thumb_png: bytes | None = None,
     ) -> None:
         event_obj = self.bot.pjsk.get_event(data.event_id)  # type: ignore[union-attr,arg-type]
         event_name = event_obj.name if event_obj else "Event"
         embed = embeds.embed(
-            title=f"{event_name} {label} Heatmap", color=discord.Color.purple()
+            title=" ".join(p for p in (event_name, label, "Heatmap") if p),
+            color=discord.Color.purple(),
         )
         embed.description = f"**Last Data Update:** <t:{int(data.updated)}:R>"
         embed.set_footer(text=resolved.upper())
@@ -172,7 +178,9 @@ class HeatmapCog(commands.Cog):
             or event_obj
         )
         if timing and timing.start_at and timing.aggregate_at:
-            graph_title = f"({resolved.upper()}) {event_name} {label} Heatmap"
+            graph_title = " ".join(
+                p for p in (f"({resolved.upper()})", event_name, label, "Heatmap") if p
+            )
             # a lazy generator - streamed + parsed inside the worker thread, so a full event's
             # snapshots never all sit in memory at once
             png = await asyncio.to_thread(
@@ -187,11 +195,42 @@ class HeatmapCog(commands.Cog):
                 iter_snapshots(resolved, data.event_id),
                 mode,
                 key,
+                current_rank,
+                username,
+                thumb_png,
             )
             files.append(discord.File(io.BytesIO(png), filename="heatmap.png"))
             embed.set_image(url="attachment://heatmap.png")
 
         await interaction.followup.send(embed=embed, files=files)
+
+    async def _user_identity(
+        self, resolved: str, user_id: int, data: CurrentEventResponse
+    ) -> tuple[str | None, bytes | None, int | None]:
+        """(display name, leader-card thumbnail png, current rank) for a tracked player.
+        current rank comes from the freshest live top 100; the name and thumbnail from
+        their profile, falling back to the live ranking row's name if it can't be fetched.
+        """
+        current_rank: int | None = None
+        row_name: str | None = None
+        for row in (data.top_100 or {}).get("rankings", []):
+            if str(row.get("userId")) == str(user_id):
+                current_rank = row.get("rank")
+                row_name = row.get("name")
+                break
+
+        username: str | None = None
+        thumb: bytes | None = None
+        try:
+            resp = await self.bot.sbuga.get_profile(user_id, resolved, fresh=False)  # type: ignore[arg-type,union-attr]
+            profile = resp.profile
+            username = (profile.get("user") or {}).get("name")
+            info = cast("InfoCog | None", self.bot.get_cog("InfoCog"))
+            if info is not None:
+                thumb = await info._leader_thumbnail_bytes(profile)
+        except Exception:
+            pass
+        return username or row_name, thumb, current_rank
 
     @heatmap_group.command(
         name="cutoff",
@@ -281,6 +320,8 @@ class HeatmapCog(commands.Cog):
                 embed=embeds.error_embed("Invalid user ID.")
             )
             return
+        uid = int(user_id)
+        username, thumb, current_rank = await self._user_identity(resolved, uid, data)
         await self._render_heatmap(
             interaction,
             resolved,
@@ -289,8 +330,11 @@ class HeatmapCog(commands.Cog):
             tz_overridden,
             data,
             "user",
-            int(user_id),
-            f"({user_id})",
+            uid,
+            "",
+            current_rank=current_rank,
+            username=username,
+            thumb_png=thumb,
         )
 
 
