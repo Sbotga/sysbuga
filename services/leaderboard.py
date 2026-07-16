@@ -116,7 +116,9 @@ def hour_stats(
         state: dict[int, tuple[int, int, int]] = {}
         for row in rows:
             uid = row.get("userId")
-            if uid not in targets:
+            # archival saves carry cutoffs with no userId at all - without this every one of
+            # those rows collapses onto a single None "player"
+            if uid is None or uid not in targets:
                 continue
             score = row.get("score")
             if score is None:

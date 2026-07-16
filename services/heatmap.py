@@ -103,6 +103,7 @@ _WEEKDAYS = [
 
 _FONT_PATH = "data/assets/image_gen/rodinntlg_m.otf"
 _FONT_BOLD = "data/assets/image_gen/rodinntlg_db.otf"
+_FONT_EB = "data/assets/image_gen/rodinntlg_eb.otf"  # titles only
 
 _BG = (17, 17, 17, 255)
 _TEXT = (242, 245, 250, 255)
@@ -135,7 +136,7 @@ _FLAG_YELLOW = (255, 205, 70, 255)  # PD asterisk + its footer note
 _NPLUS_BLUE = (96, 176, 240, 255)
 _ND_CELL = (28, 31, 40, 255)
 _ND_TEXT = (150, 162, 200, 255)
-_RANK_GREEN = (120, 200, 130, 255)  # "Currently T.." subtitle when the player is ranked
+_RANK_GREEN = (120, 200, 130, 255)  # "Current T.." subtitle when the player is ranked
 
 # coverage is gap-based: each fetch "covers" +-_COVER_MS, so consecutive fetches up to ~2x that
 # apart stay contiguous (normal poll drift is fine). only larger gaps count as missing time.
@@ -292,7 +293,7 @@ def render_heatmap(
     """render the games-per-hour heatmap (start_at/end_at/now are epoch ms). PNG bytes.
     mode "cutoff" tracks rank `key`; mode "user" tracks user id `key` (and can show ND/N+).
     `tz_overridden` is True when the user forced the timezone via the command option.
-    In user mode, `current_rank`/`username`/`thumb_png` drive the "Currently T.." subtitle
+    In user mode, `current_rank`/`username`/`thumb_png` drive the "Current T.." subtitle
     and the player name + leader-card thumbnail shown in the top-right header.
     `section` (world-link only) is drawn as a second title line - the chapter name or
     "Overall". When `chapter` is set, a world-link chapter's sub-ranking is tracked (matched
@@ -316,7 +317,7 @@ def render_heatmap(
     subtitle_color = _MUTED
     if is_user:
         if current_rank:
-            subtitle = f"Currently T{current_rank}"
+            subtitle = f"Current T{current_rank}"
             subtitle_color = _RANK_GREEN
         else:
             subtitle = "Not currently in leaderboards"
@@ -370,7 +371,7 @@ def render_heatmap(
     left = 168 * _SCALE  # day-label column
     heading_h = 42 * _SCALE  # the overall title
     section_h = 42 * _SCALE if section else 0  # the chapter/"Overall" line (world link)
-    subtitle_h = 28 * _SCALE if subtitle else 0  # the "Currently T.." line (user mode)
+    subtitle_h = 28 * _SCALE if subtitle else 0  # the "Current T.." line (user mode)
     header_h = heading_h + section_h + subtitle_h  # the whole title block
     axis_h = 24 * _SCALE  # the "Hour" axis title
     hours_h = 22 * _SCALE  # the 0-24 hour numbers
@@ -392,7 +393,7 @@ def render_heatmap(
     flag_font = ImageFont.truetype(_FONT_BOLD, 20 * _SCALE)
     footer_font = ImageFont.truetype(_FONT_PATH, 13 * _SCALE)
     axis_font = ImageFont.truetype(_FONT_BOLD, 17 * _SCALE)
-    heading_font = ImageFont.truetype(_FONT_BOLD, 24 * _SCALE)
+    heading_font = ImageFont.truetype(_FONT_EB, 24 * _SCALE)
     subtitle_font = ImageFont.truetype(_FONT_BOLD, 15 * _SCALE)
     name_font = ImageFont.truetype(_FONT_BOLD, 18 * _SCALE)
 

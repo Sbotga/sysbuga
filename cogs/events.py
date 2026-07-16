@@ -10,6 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from cogs.heatmap import _chapter_autocomplete
 from cogs.information import _render_leader_card
 from data.models import Card, Event
 from data.pjsk import character_display_name
@@ -17,8 +18,8 @@ from data.search import preprocess
 from helpers import converters, embeds, tools
 from helpers.autocompletes import autocompletes
 from helpers.emojis import emojis
-from helpers.views import Paginator, SbugaView
-from services import event_story, leaderboard as lb
+from helpers.views import SbugaView
+from services import event_story, graph, leaderboard as lb
 from services.event_store import EVENT_REGIONS, iter_snapshots, read_current_event
 
 if TYPE_CHECKING:
@@ -28,6 +29,12 @@ _FIELD_LIMIT = 1024
 
 _LB_PER_PAGE = 20
 _LB_FOOTER = "inspired by GhostNeneRobo"
+# the tiers /event cutoff offers - the top-100 ranks worth showing plus every border tier the
+# api returns, which is exactly what we save per poll
+_CUTOFF_TIERS = [
+    10, 20, 30, 40, 50, 100, 200, 300, 400, 500, 1000, 1500, 2000, 2500, 3000,
+    4000, 5000, 10000, 20000, 30000, 40000, 50000, 100000,
+]  # fmt: skip
 # rendered leader cards, keyed by everything that changes the art - the same players show up
 # across page/ALT/OFFSET flips, so this saves re-fetching their card every render
 _CARD_CACHE: dict[tuple, bytes] = {}
@@ -80,14 +87,18 @@ class EventsCog(commands.Cog):
         """True when the event is a leak and this channel isn't whitelisted for leaks"""
         if not self.bot.pjsk.is_event_leaked(event_id):  # type: ignore[union-attr]
             return False
-        return not await self.bot.user_data.channel_leaks_allowed(interaction.channel_id)  # type: ignore[union-attr,arg-type]
+        return not await self.bot.user_data.channel_leaks_allowed(
+            interaction.channel_id
+        )  # type: ignore[union-attr,arg-type]
 
     async def _resolve_region(
         self, interaction: discord.Interaction, region: str
     ) -> str | None:
         region = region.lower().strip()
         if region == "default":
-            region = await self.bot.user_data.get_settings(interaction.user.id, "default_region")  # type: ignore[union-attr]
+            region = await self.bot.user_data.get_settings(
+                interaction.user.id, "default_region"
+            )  # type: ignore[union-attr]
         if region not in EVENT_REGIONS:
             await interaction.followup.send(
                 embed=embeds.error_embed(f"Region `{region.upper()}` isn't supported.")
@@ -215,7 +226,11 @@ class EventsCog(commands.Cog):
         sels = [_LBSel(None, "Overall", True, False)]
         now = int(time.time() * 1000)
         for wb in timing.world_blooms if timing else []:
-            char = self.bot.pjsk.get_character(wb.game_character_id) if wb.game_character_id else None  # type: ignore[union-attr,arg-type]
+            char = (
+                self.bot.pjsk.get_character(wb.game_character_id)
+                if wb.game_character_id
+                else None
+            )  # type: ignore[union-attr,arg-type]
             sels.append(
                 _LBSel(
                     character_id=wb.game_character_id,
@@ -259,6 +274,138 @@ class EventsCog(commands.Cog):
             return None
         _CARD_CACHE[key] = png
         return png
+
+    def _cutoff_window(
+        self, region: str, event_id: int, cid: int | None
+    ) -> tuple[int, int] | None:
+        """(ranking start, ranking end) for the overall event, or for one world-link chapter -
+        a chapter's cutoff is measured over its own window, not the whole event's"""
+        timing = next(
+            (e for e in self.bot.pjsk.region_events(region) if e.id == event_id),  # type: ignore[union-attr]
+            None,
+        ) or self.bot.pjsk.get_event(
+            event_id
+        )  # type: ignore[union-attr]
+        if timing is None:
+            return None
+        if cid is None:
+            if timing.start_at is None or timing.aggregate_at is None:
+                return None
+            return timing.start_at, timing.aggregate_at
+        for wb in timing.world_blooms:
+            if wb.game_character_id == cid:
+                return wb.start_at, wb.aggregate_at
+        return None
+
+    @event.command(
+        name="cutoff", description="Detailed information about a tier's cutoff."
+    )
+    @app_commands.choices(
+        tier=[app_commands.Choice(name=f"T{t}", value=t) for t in _CUTOFF_TIERS]
+    )
+    @app_commands.autocomplete(
+        chapter=_chapter_autocomplete,
+        region=autocompletes.pjsk_region(EVENT_REGIONS),
+    )
+    @app_commands.describe(
+        tier="The cutoff tier specified.",
+        chapter="World Link chapter (defaults to the overall event).",
+        region="Game server region.",
+    )
+    async def cutoff(
+        self,
+        interaction: discord.Interaction,
+        tier: int,
+        chapter: str | None = None,
+        region: str = "default",
+    ) -> None:
+        await interaction.response.defer(thinking=True)
+        resolved = await self._resolve_region(interaction, region)
+        if resolved is None:
+            return
+        data = await read_current_event(resolved)
+        if data is None or not data.event_id:
+            await interaction.followup.send(
+                embed=embeds.error_embed("There's no active event right now.")
+            )
+            return
+
+        cid = int(chapter) if chapter and chapter.isdigit() else None
+        series, _ = await asyncio.to_thread(
+            graph.cutoff_series,
+            iter_snapshots(resolved, data.event_id),
+            tier=tier,
+            chapter_cid=cid,
+            chapter=cid is not None,
+        )
+        if not series:
+            await interaction.followup.send(
+                embed=embeds.error_embed(
+                    f"No data saved for T{tier} on this event yet."
+                )
+            )
+            return
+
+        event_obj = self.bot.pjsk.get_event(data.event_id)  # type: ignore[union-attr]
+        window = self._cutoff_window(resolved, data.event_id, cid)
+        if window is None:
+            await interaction.followup.send(
+                embed=embeds.error_embed("That event's timings aren't available.")
+            )
+            return
+        start_at, aggregate_at = window
+
+        ts, score = series[-1]
+        # the last reading at least an hour back - polls are minutely, so allow a minute of
+        # drift the same way RoboNene does rather than demanding an exact 60:00 spacing
+        last_hour = series[0]
+        for point in reversed(series):
+            if ts - point[0] >= 3_600_000 - 60_000:
+                last_hour = point
+                break
+
+        elapsed = ts - start_at
+        score_ph = round(score * 3_600_000 / elapsed) if elapsed > 0 else 0
+        if ts > aggregate_at:  # ranking is over; nothing is moving any more
+            last_hour_ts, speed = ts, 0
+        else:
+            last_hour_ts = last_hour[0]
+            delta = ts - last_hour_ts
+            speed = round((score - last_hour[1]) * 3_600_000 / delta) if delta else 0
+        duration = max(1, aggregate_at - start_at)
+        pct = min(elapsed * 100 / duration, 100)
+
+        name = event_obj.name if event_obj else f"Event {data.event_id}"
+        char = self.bot.pjsk.get_character(cid) if cid is not None else None  # type: ignore[union-attr]
+        if char is not None:
+            name += f" - {character_display_name(char)}"
+        embed = embeds.embed(
+            title=f"{name} T{tier} Cutoff", color=discord.Color.purple()
+        )
+        embed.description = f"**Requested:** <t:{ts // 1000}:R>"
+        if event_obj and event_obj.logo_url:
+            embed.set_thumbnail(url=event_obj.logo_url)
+        embed.add_field(
+            name="Cutoff Statistics",
+            value=(
+                f"Points: `{score:,}`\n"
+                f"Avg. Speed (Per Hour): `{score_ph:,}/h`\n"
+                f"Avg. Speed [<t:{last_hour_ts // 1000}:R> to <t:{ts // 1000}:R>] "
+                f"(Per Hour): `{speed:,}/h`\n"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Event Information",
+            value=(
+                f"Ranking Started: <t:{start_at // 1000}:R>\n"
+                f"Ranking Ends: <t:{aggregate_at // 1000}:R>\n"
+                f"Percentage Through Event: `{pct:.2f}%`\n"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text=f"{resolved.upper()} - {_LB_FOOTER}")
+        await interaction.followup.send(embed=embed)
 
     @event.command(name="leaderboard", description="View the current event's top 100.")
     @app_commands.autocomplete(region=autocompletes.pjsk_region(EVENT_REGIONS))
@@ -333,7 +480,8 @@ class EventsCog(commands.Cog):
     def _schedule_embed(self, region: str) -> discord.Embed:
         now = int(time.time() * 1000)
         events = sorted(
-            self.bot.pjsk.region_events(region), key=lambda e: e.start_at or 0  # type: ignore[union-attr]
+            self.bot.pjsk.region_events(region),
+            key=lambda e: e.start_at or 0,  # type: ignore[union-attr]
         )
         embed = embeds.embed(
             title=f"{region.upper()} Event Schedule", color=discord.Color.purple()

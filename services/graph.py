@@ -19,6 +19,7 @@ from services.leaderboard import _rows_of
 
 _FONT_MED = "data/assets/image_gen/rodinntlg_m.otf"
 _FONT_BOLD = "data/assets/image_gen/rodinntlg_db.otf"
+_FONT_EB = "data/assets/image_gen/rodinntlg_eb.otf"  # titles only
 
 _SCALE = 2  # supersample factor - PIL doesn't antialias, so we draw big and shrink
 
@@ -32,7 +33,22 @@ _MUTED = (150, 162, 178, 255)
 _GRID = (40, 52, 66, 255)
 _LINE = (96, 176, 240, 255)  # the tracked player
 _CUTOFF = (231, 106, 106, 255)  # the tier's cutoff, when comparing
-_RANK_GREEN = (120, 200, 130, 255)  # "Currently T.." when the player is ranked
+_RANK_GREEN = (120, 200, 130, 255)  # "Current T.." when the player is ranked
+
+
+def _snapshot_rows(snap: dict, chapter_cid: int | None, chapter: bool) -> list[dict]:
+    """every ranked row in one poll: the top 100, plus the border tiers (T200 and beyond) that
+    live in a sibling key - without those, any tier past 100 looks like it has no data
+    """
+    ranking = snap.get("ranking") or {}
+    border = snap.get("border") or {}
+    rows = _rows_of(ranking, chapter_cid, chapter)
+    if not chapter:
+        return rows + (border.get("borderRankings") or [])
+    for chap in border.get("userWorldBloomChapterRankingBorders") or []:
+        if chap.get("gameCharacterId") == chapter_cid:
+            return rows + (chap.get("borderRankings") or [])
+    return rows
 
 
 def cutoff_series(
@@ -62,7 +78,7 @@ def cutoff_series(
             ts = int(datetime.datetime.fromisoformat(created).timestamp() * 1000)
         except ValueError:
             continue
-        rows = _rows_of(ranking, chapter_cid, chapter)
+        rows = _snapshot_rows(snap, chapter_cid, chapter)
         if user_id is not None:
             score = next(
                 (r.get("score") for r in rows if r.get("userId") == user_id), None
@@ -163,7 +179,7 @@ def render_graph(
     """The points-over-time line chart as a PNG. Blocking (PIL); run off the event loop.
 
     The header mirrors the heatmap's: `title`, then `section` (world-link only - the chapter
-    name or "Overall"), then a "Currently T.." subtitle, with the player name and their
+    name or "Overall"), then a "Current T.." subtitle, with the player name and their
     leader-card thumbnail pinned top-right. `by_tier` follows the cutoff rather than a player,
     so it has no subtitle or panel. Stretches with no readings - the player off the top 100,
     or the tracker down - are drawn dashed rather than lined straight across.
@@ -180,14 +196,14 @@ def render_graph(
     subtitle_color = _MUTED
     if not by_tier:
         if current_rank:
-            subtitle = f"Currently T{current_rank}"
+            subtitle = f"Current T{current_rank}"
             subtitle_color = _RANK_GREEN
         else:
             subtitle = "Not currently in leaderboards"
     subtitle_h = 28 * _SCALE if subtitle else 0
     header_h = heading_h + section_h + subtitle_h
 
-    f_head = ImageFont.truetype(_FONT_BOLD, 24 * _SCALE)
+    f_head = ImageFont.truetype(_FONT_EB, 24 * _SCALE)
     f_sub = ImageFont.truetype(_FONT_BOLD, 15 * _SCALE)
     f_name = ImageFont.truetype(_FONT_BOLD, 18 * _SCALE)
     f_axis = ImageFont.truetype(_FONT_MED, 15 * _SCALE)
