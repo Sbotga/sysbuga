@@ -71,6 +71,10 @@ def _profiles_path(region: str, event_id: int) -> Path:
     return event_save_dir(region, event_id) / "profiles.json"
 
 
+def _cutoffs_path(region: str, event_id: int) -> Path:
+    return event_save_dir(region, event_id) / "cutoffs.json"
+
+
 def _zst_path(path: Path) -> Path:
     return path.with_name(path.name + ".zst")
 
@@ -412,8 +416,74 @@ def _compress_file(path: Path) -> None:
     _fsync_dir(path.parent)
 
 
+def _build_cutoffs(region: str, event_id: int) -> dict[str, list[int]]:
+    """{tier: [event points every minute]} for the whole event - the top 100 ranks plus whatever
+    border tiers the api returned. Index 0 is the first poll's minute and each entry is the
+    minute after the last; a minute we never polled repeats the previous score, since a cutoff
+    can only ever go up. Scores only - no user ids, no names. Blocking; decodes every snapshot.
+    """
+    per_tier: dict[int, dict[int, int]] = {}
+    first: int | None = None
+    last: int | None = None
+    for snap in iter_snapshots(region, event_id):
+        ranking = snap.get("ranking") or {}
+        created = ranking.get("createdAt")
+        if not created:
+            continue
+        try:
+            minute = int(datetime.fromisoformat(created).timestamp()) // 60
+        except ValueError:
+            continue
+        first = minute if first is None else min(first, minute)
+        last = minute if last is None else max(last, minute)
+        rows = list(ranking.get("rankings") or [])
+        rows += (snap.get("border") or {}).get("borderRankings") or []
+        for row in rows:
+            rank, score = row.get("rank"), row.get("score")
+            if rank is not None and score is not None:
+                per_tier.setdefault(rank, {})[minute] = score
+    if first is None or last is None:
+        return {}
+    out: dict[str, list[int]] = {}
+    for tier in sorted(per_tier):
+        by_minute = per_tier[tier]
+        score = 0
+        series: list[int] = []
+        for minute in range(first, last + 1):
+            score = by_minute.get(minute, score)
+            series.append(score)
+        out[str(tier)] = series
+    return out
+
+
+def _write_cutoffs(event_dir: Path) -> None:
+    """the per-minute cutoff table, left uncompressed beside the archive so a lookup never has
+    to decode a whole event's snapshots"""
+    if not event_dir.name.isdigit():
+        return
+    path = event_dir / "cutoffs.json"
+    if path.exists():
+        return
+    cutoffs = _build_cutoffs(event_dir.parent.name, int(event_dir.name))
+    if cutoffs:
+        _atomic_write(path, json.dumps(cutoffs, separators=(",", ":")))
+
+
+def read_cutoffs(region: str, event_id: int) -> dict[str, list[int]]:
+    """the saved {tier: [event points every minute]} table, or {} if the event has no archive
+    yet. Cheap - this is the whole point of keeping it uncompressed."""
+    path = _cutoffs_path(region, event_id)
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def compress_event_dir(event_dir: Path) -> None:
-    """archive a finished event's snapshot + profile files"""
+    """archive a finished event's snapshot + profile files, leaving the per-minute cutoffs
+    uncompressed next to them for hot fetches"""
+    # written first, while the source is still uncompressed - iter_snapshots reads either form,
+    # but this way the one full pass happens on the cheaper one
+    _write_cutoffs(event_dir)
     _compress_file(event_dir / "snapshots.jsonl")
     _compress_file(event_dir / "profiles.json")
 

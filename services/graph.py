@@ -265,9 +265,12 @@ def render_graph(
         return _finish(img)
 
     # both lines share one set of axes, so the ranges have to span whichever runs longer or
-    # higher - the player's series starts late if they entered the top 100 mid-event
+    # higher - the player's series starts late if they entered the top 100 mid-event, and the
+    # axis reaches back to the event opening so that lead-in has somewhere to be drawn
     spanning = series + (cutoff or [])
     t0 = min(ts for ts, _ in spanning)
+    if start_at is not None:
+        t0 = min(t0, start_at)
     t1 = max(ts for ts, _ in spanning)
     y1 = max(s for _, s in spanning)
     tspan = max(1, t1 - t0)
@@ -334,6 +337,18 @@ def render_graph(
                 r = 3.5 * _SCALE
                 (x, y) = seg[0]
                 draw.ellipse([x - r, y - r, x + r, y + r], fill=color)
+
+        # everyone is on zero when the event opens, so a series we only pick up later isn't
+        # unknown at both ends - it gets the same dashed bridge back to the origin rather than
+        # appearing out of thin air partway across
+        if pts and start_at is not None and pts[0][0] - start_at > _FLICKER_MS:
+            _dotted_line(
+                draw,
+                (px(start_at), py(0)),
+                (px(pts[0][0]), py(pts[0][1])),
+                color,
+                3 * _SCALE,
+            )
 
         seg: list[tuple[float, float]] = []
         for i, (ts, score) in enumerate(pts):
