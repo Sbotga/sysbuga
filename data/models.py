@@ -72,6 +72,9 @@ class Music(BaseModel):
     tags: list[str] = []
     published_at: int
     released_at: int | None = None
+    removed_at: int | None = (
+        None  # per-region: set once the song is removed from that region
+    )
     is_newly_written: bool = False
     is_full_length: bool = False
     filler_sec: float = 0.0

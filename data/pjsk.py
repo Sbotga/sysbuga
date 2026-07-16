@@ -288,6 +288,8 @@ class PJSKData:
         for m in self._music_cache.get(region, []):
             if m.published_at > now:
                 continue  # not out in this region yet (a leak / unreleased)
+            if m.removed_at is not None:
+                continue  # removed from this region - no longer playable
             if self.is_music_limited(m.id):
                 continue  # limited-time songs aren't counted in the totals
             for d in m.difficulties:
@@ -300,6 +302,26 @@ class PJSKData:
             for r in self.regions
             if any(m.id == music_id for m in self._music_cache.get(r, []))
         ]
+
+    def removed_regions_for_music(self, music_id: int) -> list[str]:
+        """regions whose copy of the song has been removed (has a removed_at)"""
+        out: list[str] = []
+        for r in self.regions:
+            for m in self._music_cache.get(r, []):
+                if m.id == music_id and m.removed_at is not None:
+                    out.append(r)
+                    break
+        return out
+
+    def music_removed_at(self, music_id: int) -> dict[str, int]:
+        """region -> removal timestamp (ms), for every region the song was removed from"""
+        out: dict[str, int] = {}
+        for r in self.regions:
+            for m in self._music_cache.get(r, []):
+                if m.id == music_id and m.removed_at is not None:
+                    out[r] = m.removed_at
+                    break
+        return out
 
     def append_regions_for_music(self, music_id: int) -> list[str]:
         """regions whose copy of this song carries an append chart (parallels

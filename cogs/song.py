@@ -469,9 +469,26 @@ class SongInfo(commands.Cog):
                 )
 
         bpms = await self._song_bpms(music)
-        lines = [
-            f"**Server Availability:** `{', '.join(r.upper() for r in regions) or 'None'}`"
-        ]
+        removed = self.bot.pjsk.removed_regions_for_music(music.id)  # type: ignore[union-attr]
+        available = [r for r in regions if r not in removed]
+        lines: list[str] = []
+        if regions and not available:  # removed from every region it was ever on
+            lines.append(
+                f"**Former Server Availability:** `{', '.join(r.upper() for r in regions)}`"
+            )
+            removed_ts = self.bot.pjsk.music_removed_at(music.id)  # type: ignore[union-attr]
+            if removed_ts:
+                lines.append(
+                    f"**Fully Removed at:** <t:{int(max(removed_ts.values()) / 1000)}:D>"
+                )
+        else:
+            lines.append(
+                f"**Server Availability:** `{', '.join(r.upper() for r in available) or 'None'}`"
+            )
+            if removed:
+                lines.append(
+                    f"**Removed from:** `{', '.join(r.upper() for r in removed)}`"
+                )
         # append rolls out per region on its own — and since EN wins the merge, a JP-only
         # append won't be in music.difficulties, so key off the region list, not diff_map
         append_regions = self.bot.pjsk.append_regions_for_music(music.id)  # type: ignore[union-attr]
