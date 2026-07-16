@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import io
 import time
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ from discord.ext import commands
 from helpers import embeds
 from helpers.autocompletes import autocompletes
 from helpers.views import SbugaView
-from services import heatmap
+from services import graph, heatmap
 from services.event_store import EVENT_REGIONS, iter_snapshots, read_current_event
 from services.models import CurrentEventResponse
 
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from main import SbugaBot
 
 _HEATMAP_MAX_TIER = 100  # heatmap only covers the top 100
+_HEATMAP_FOOTER = "inspired by seka.ing"
 
 
 def _parse_tier(text: str) -> int | None:
@@ -86,6 +88,34 @@ async def _timezone_autocomplete(
         app_commands.Choice(name=tz, value=tz)
         for tz in heatmap.timezone_suggestions(current)
     ]
+
+
+async def _chapter_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    """the current event's world-link chapters, by focus character (empty on a normal event)"""
+    bot = interaction.client
+    region = getattr(interaction.namespace, "region", None)
+    if region not in EVENT_REGIONS:
+        region = "en"
+    data = await read_current_event(region)
+    if not data or not data.event_id:
+        return []
+    timing = next(
+        (e for e in bot.pjsk.region_events(region) if e.id == data.event_id),  # type: ignore[attr-defined]
+        None,
+    )
+    out: list[app_commands.Choice[str]] = []
+    for wb in timing.world_blooms if timing else []:
+        if not wb.game_character_id:
+            continue
+        char = bot.pjsk.get_character(wb.game_character_id)  # type: ignore[attr-defined]
+        name = (
+            char.given_name if char and char.given_name else f"Chapter {wb.chapter_no}"
+        )
+        if not current or current.lower() in name.lower():
+            out.append(app_commands.Choice(name=name, value=str(wb.game_character_id)))
+    return out[:25]
 
 
 @dataclass
@@ -174,7 +204,7 @@ async def _render_selection(
         color=discord.Color.purple(),
     )
     embed.description = f"**Last Data Update:** <t:{int(state.data.updated)}:R>"
-    embed.set_footer(text=state.resolved.upper())
+    embed.set_footer(text=f"{state.resolved.upper()} - {_HEATMAP_FOOTER}")
     # a lazy generator - streamed + parsed inside the worker thread, so a full event's
     # snapshots never all sit in memory at once
     png = await asyncio.to_thread(
@@ -259,7 +289,9 @@ class HeatmapCog(commands.Cog):
     ) -> str | None:
         region = region.lower().strip()
         if region == "default":
-            region = await self.bot.user_data.get_settings(interaction.user.id, "default_region")  # type: ignore[union-attr]
+            region = await self.bot.user_data.get_settings(
+                interaction.user.id, "default_region"
+            )  # type: ignore[union-attr]
         if region not in EVENT_REGIONS:
             await interaction.followup.send(
                 embed=embeds.error_embed(f"Region `{region.upper()}` isn't supported.")
@@ -321,7 +353,11 @@ class HeatmapCog(commands.Cog):
             )
         ]
         for wb in timing.world_blooms:
-            char = self.bot.pjsk.get_character(wb.game_character_id) if wb.game_character_id else None  # type: ignore[union-attr,arg-type]
+            char = (
+                self.bot.pjsk.get_character(wb.game_character_id)
+                if wb.game_character_id
+                else None
+            )  # type: ignore[union-attr,arg-type]
             name = (
                 char.given_name
                 if char and char.given_name
@@ -374,7 +410,7 @@ class HeatmapCog(commands.Cog):
                 color=discord.Color.purple(),
             )
             embed.description = f"**Last Data Update:** <t:{int(data.updated)}:R>"
-            embed.set_footer(text=resolved.upper())
+            embed.set_footer(text=f"{resolved.upper()} - {_HEATMAP_FOOTER}")
             await interaction.followup.send(embed=embed)
             return
 
@@ -406,6 +442,45 @@ class HeatmapCog(commands.Cog):
         )
         if view is not None:
             view.message = await interaction.original_response()
+
+    async def _resolve_target(
+        self,
+        interaction: discord.Interaction,
+        resolved: str,
+        user_id: str | None,
+        user: discord.User | None,
+    ) -> int | None:
+        """The PJSK id to track: an explicit id, a linked discord user, or the caller's own
+        link. Sends the error itself and returns None when it can't resolve one."""
+        if user_id and user is not None:
+            await interaction.followup.send(
+                embed=embeds.error_embed(
+                    "Pass either `user_id` or `user`, not both.", title="Pick One"
+                )
+            )
+            return None
+        target = user or (None if user_id else interaction.user)
+        if target is not None:
+            linked = await self.bot.user_data.get_pjsk_id(target.id, resolved)  # type: ignore[union-attr]
+            if not linked:
+                msg = (
+                    f"{target.display_name} hasn't linked a PJSK account for "
+                    f"{resolved.upper()}."
+                    if user is not None
+                    else f"Link your {resolved.upper()} PJSK account, or pass a user ID."
+                )
+                await interaction.followup.send(
+                    embed=embeds.error_embed(msg, title="Not Linked")
+                )
+                return None
+            return int(linked)
+        assert user_id is not None
+        if not user_id.isdigit():
+            await interaction.followup.send(
+                embed=embeds.error_embed("Invalid user ID.")
+            )
+            return None
+        return int(user_id)
 
     async def _user_identity(
         self, resolved: str, user_id: int, data: CurrentEventResponse
@@ -514,6 +589,7 @@ class HeatmapCog(commands.Cog):
     )
     @app_commands.describe(
         user_id="PJSK user ID (omit to use your linked account).",
+        user="A Discord user with a linked account (can't be used with user_id).",
         region="Game server region.",
         timezone="Timezone for the hours/days (defaults to your setting, or ET).",
     )
@@ -521,6 +597,7 @@ class HeatmapCog(commands.Cog):
         self,
         interaction: discord.Interaction,
         user_id: str | None = None,
+        user: discord.User | None = None,
         region: str = "default",
         timezone: str | None = None,
     ) -> None:
@@ -530,23 +607,236 @@ class HeatmapCog(commands.Cog):
             return
         resolved, tz, tz_label, tz_overridden, data = setup
 
-        if not user_id:
-            linked = await self.bot.user_data.get_pjsk_id(interaction.user.id, resolved)  # type: ignore[union-attr]
-            if not linked:
+        uid = await self._resolve_target(interaction, resolved, user_id, user)
+        if uid is None:
+            return
+        await self._send_user_heatmap(
+            interaction, resolved, tz, tz_label, tz_overridden, data, uid
+        )
+
+    graph_group = app_commands.Group(
+        name="graph",
+        description="Event points-over-time graphs.",
+        allowed_installs=app_commands.AppInstallationType(guild=True, user=True),
+        allowed_contexts=app_commands.AppCommandContext(
+            guild=True, dm_channel=True, private_channel=True
+        ),
+    )
+
+    @graph_group.command(
+        name="cutoff", description="Graph a tier's event points over time."
+    )
+    @app_commands.autocomplete(
+        tier=_tier_autocomplete(_HEATMAP_MAX_TIER),
+        chapter=_chapter_autocomplete,
+        region=autocompletes.pjsk_region(EVENT_REGIONS),
+        timezone=_timezone_autocomplete,
+    )
+    @app_commands.describe(
+        tier="Rank 1-100 (e.g. 5, 100, T100).",
+        by_tier="Graph the cutoff line itself, instead of the player currently at that tier.",
+        chapter="World Link chapter (defaults to the overall event).",
+        region="Game server region.",
+        timezone="Timezone for the hours (defaults to your setting, or ET).",
+    )
+    async def graph_cutoff(
+        self,
+        interaction: discord.Interaction,
+        tier: str,
+        by_tier: bool = False,
+        chapter: str | None = None,
+        region: str = "default",
+        timezone: str | None = None,
+    ) -> None:
+        await interaction.response.defer(thinking=True)
+        setup = await self._heatmap_setup(interaction, region, timezone)
+        if setup is None:
+            return
+        resolved, tz, tz_label, tz_overridden, data = setup
+
+        parsed = _parse_tier(tier)
+        if parsed is None or parsed not in set(_tier_options(data, _HEATMAP_MAX_TIER)):
+            await interaction.followup.send(
+                embed=embeds.error_embed(
+                    f"`{tier}` isn't a valid tier. Pick a rank from 1-100 (e.g. `T50`)."
+                )
+            )
+            return
+
+        cid = int(chapter) if chapter and chapter.isdigit() else None
+        uid: int | None = None
+        if not by_tier:
+            uid = _user_at_rank(data, parsed)
+            if uid is None:
+                await interaction.followup.send(
+                    embed=embeds.error_embed(f"No one is at T{parsed} right now.")
+                )
+                return
+        await self._send_graph(
+            interaction,
+            resolved,
+            tz,
+            tz_label,
+            data,
+            label=f"T{parsed}" + (" Cutoff" if by_tier else ""),
+            uid=int(uid) if uid is not None else None,
+            tier=parsed,
+            cid=cid,
+            by_tier=by_tier,
+        )
+
+    @graph_group.command(
+        name="user", description="Graph a player's event points over time."
+    )
+    @app_commands.autocomplete(
+        compare_tier=_tier_autocomplete(_HEATMAP_MAX_TIER),
+        chapter=_chapter_autocomplete,
+        region=autocompletes.pjsk_region(EVENT_REGIONS),
+        timezone=_timezone_autocomplete,
+    )
+    @app_commands.describe(
+        user_id="PJSK user ID (omit to use your linked account).",
+        user="A Discord user with a linked account (can't be used with user_id).",
+        compare_tier="Also plot this tier's cutoff to compare against (e.g. T100).",
+        chapter="World Link chapter (defaults to the overall event).",
+        region="Game server region.",
+        timezone="Timezone for the hours (defaults to your setting, or ET).",
+    )
+    async def graph_user(
+        self,
+        interaction: discord.Interaction,
+        user_id: str | None = None,
+        user: discord.User | None = None,
+        compare_tier: str | None = None,
+        chapter: str | None = None,
+        region: str = "default",
+        timezone: str | None = None,
+    ) -> None:
+        await interaction.response.defer(thinking=True)
+        setup = await self._heatmap_setup(interaction, region, timezone)
+        if setup is None:
+            return
+        resolved, tz, tz_label, _, data = setup
+
+        uid = await self._resolve_target(interaction, resolved, user_id, user)
+        if uid is None:
+            return
+        parsed: int | None = None
+        if compare_tier:
+            parsed = _parse_tier(compare_tier)
+            if parsed is None or parsed not in set(
+                _tier_options(data, _HEATMAP_MAX_TIER)
+            ):
                 await interaction.followup.send(
                     embed=embeds.error_embed(
-                        f"Link your {resolved.upper()} PJSK account, or pass a user ID."
+                        f"`{compare_tier}` isn't a valid tier. Pick a rank from 1-100 "
+                        "(e.g. `T50`)."
                     )
                 )
                 return
-            user_id = str(linked)
-        if not user_id.isdigit():
-            await interaction.followup.send(
-                embed=embeds.error_embed("Invalid user ID.")
+        await self._send_graph(
+            interaction,
+            resolved,
+            tz,
+            tz_label,
+            data,
+            label="",
+            uid=uid,
+            tier=parsed,
+            cid=int(chapter) if chapter and chapter.isdigit() else None,
+            by_tier=False,
+        )
+
+    async def _send_graph(
+        self,
+        interaction: discord.Interaction,
+        resolved: str,
+        tz: object,
+        tz_label: str,
+        data: CurrentEventResponse,
+        *,
+        label: str,
+        uid: int | None,
+        tier: int | None,
+        cid: int | None,
+        by_tier: bool,
+    ) -> None:
+        """Render a points-over-time graph - shared by /graph user and /graph cutoff (which
+        resolves the tier to whoever is at that rank), so the two are identical. With both a
+        `uid` and a `tier`, the tier's cutoff is drawn alongside the player to compare.
+        """
+        series, cutoff = await asyncio.to_thread(
+            graph.cutoff_series,
+            iter_snapshots(resolved, data.event_id),  # type: ignore[arg-type]
+            tier=tier,
+            user_id=uid,
+            chapter_cid=cid,
+            chapter=cid is not None,
+        )
+        event_obj = self.bot.pjsk.get_event(data.event_id)  # type: ignore[union-attr,arg-type]
+        event_name = event_obj.name if event_obj else "Event"
+
+        # same header as the heatmap: title line, the chapter/"Overall" section line on
+        # world links, then the tracked player's standing + name + leader card. the
+        # selection also carries the window the x axis numbers its days from
+        timing = next(
+            (e for e in self.bot.pjsk.region_events(resolved) if e.id == data.event_id),  # type: ignore[union-attr]
+            None,
+        )
+        section: str | None = None
+        start_at: int | None = None
+        if timing:
+            selections = self._selections(timing, event_name)
+            sel = next(
+                (s for s in selections if s.is_chapter and s.character_id == cid),
+                selections[0],
             )
-            return
-        await self._send_user_heatmap(
-            interaction, resolved, tz, tz_label, tz_overridden, data, int(user_id)
+            start_at = sel.start_at
+            section = sel.button_label if len(selections) > 1 else None
+        username: str | None = None
+        thumb: bytes | None = None
+        current_rank: int | None = None
+        if uid is not None:
+            username, thumb = await self._user_identity(resolved, uid, data)
+            current_rank = (
+                _chapter_rank(data, uid, cid)
+                if cid is not None
+                else _overall_rank(data, uid)
+            )
+
+        png = await asyncio.to_thread(
+            functools.partial(
+                graph.render_graph,
+                series,
+                " ".join(
+                    p
+                    for p in (f"({resolved.upper()})", event_name, label, "Graph")
+                    if p
+                ),
+                tz,
+                tz_label,
+                current_rank=current_rank,
+                username=username,
+                thumb_png=thumb,
+                section=section,
+                by_tier=by_tier,
+                cutoff=cutoff,
+                series_label=username or "Player",
+                cutoff_label=f"T{tier} Cutoff",
+                start_at=start_at,
+            )
+        )
+        embed = embeds.embed(
+            title=" ".join(p for p in (event_name, label, "Graph") if p),
+            color=discord.Color.purple(),
+        )
+        embed.description = f"**Last Data Update:** <t:{int(data.updated)}:R>"
+        if event_obj and event_obj.logo_url:
+            embed.set_thumbnail(url=event_obj.logo_url)
+        embed.set_image(url="attachment://graph.png")
+        embed.set_footer(text=f"{resolved.upper()} - {_HEATMAP_FOOTER}")
+        await interaction.followup.send(
+            embed=embed, file=discord.File(io.BytesIO(png), "graph.png")
         )
 
 

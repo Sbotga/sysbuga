@@ -3,26 +3,49 @@ from __future__ import annotations
 import asyncio
 import io
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from data.models import Event
+from cogs.information import _render_leader_card
+from data.models import Card, Event
 from data.pjsk import character_display_name
 from data.search import preprocess
 from helpers import converters, embeds, tools
 from helpers.autocompletes import autocompletes
 from helpers.emojis import emojis
 from helpers.views import Paginator, SbugaView
-from services import event_story
-from services.event_store import EVENT_REGIONS, read_current_event
+from services import event_story, leaderboard as lb
+from services.event_store import EVENT_REGIONS, iter_snapshots, read_current_event
 
 if TYPE_CHECKING:
     from main import SbugaBot
 
 _FIELD_LIMIT = 1024
+
+_LB_PER_PAGE = 20
+_LB_FOOTER = "inspired by GhostNeneRobo"
+# rendered leader cards, keyed by everything that changes the art - the same players show up
+# across page/ALT/OFFSET flips, so this saves re-fetching their card every render
+_CARD_CACHE: dict[tuple, bytes] = {}
+
+
+@dataclass
+class _LBSel:
+    """one leaderboard view: the overall ranking, or a single world-link chapter"""
+
+    character_id: int | None
+    label: str  # "Overall" or the chapter's focus character
+    progressed: bool
+    is_chapter: bool
+
+
+def _delta(d: int) -> tuple[int, int]:
+    """(direction, places) for a rank change since an hour ago"""
+    return (1 if d > 0 else -1 if d < 0 else 0), abs(d)
 
 
 def _alias_field(values: list[str]) -> str:
@@ -181,11 +204,70 @@ class EventsCog(commands.Cog):
         )
         await interaction.followup.send(embed=embed)
 
+    def _lb_selections(self, region: str, event_id: int) -> list[_LBSel]:
+        """Overall plus one entry per world-link chapter (empty of chapters on a normal event)."""
+        timing = next(
+            (e for e in self.bot.pjsk.region_events(region) if e.id == event_id),  # type: ignore[union-attr]
+            None,
+        ) or self.bot.pjsk.get_event(
+            event_id
+        )  # type: ignore[union-attr]
+        sels = [_LBSel(None, "Overall", True, False)]
+        now = int(time.time() * 1000)
+        for wb in timing.world_blooms if timing else []:
+            char = self.bot.pjsk.get_character(wb.game_character_id) if wb.game_character_id else None  # type: ignore[union-attr,arg-type]
+            sels.append(
+                _LBSel(
+                    character_id=wb.game_character_id,
+                    label=(
+                        char.given_name
+                        if char and char.given_name
+                        else f"Chapter {wb.chapter_no}"
+                    ),
+                    progressed=wb.start_at <= now,
+                    is_chapter=True,
+                )
+            )
+        return sels
+
+    async def _lb_card(self, user_card: dict) -> bytes | None:
+        """The player's leader card art, straight off their ranking row - no profile fetch."""
+        cid = user_card.get("cardId")
+        card: Card | None = self.bot.pjsk.get_card(cid) if cid else None  # type: ignore[union-attr,arg-type]
+        if not card or not card.attr:
+            return None
+        trained = user_card.get("defaultImage") == "special_training" and bool(
+            card.thumbnail_url_trained
+        )
+        key = (cid, user_card.get("level"), user_card.get("masterRank", 0), trained)
+        if key in _CARD_CACHE:
+            return _CARD_CACHE[key]
+        url = card.thumbnail_url_trained if trained else card.thumbnail_url_normal
+        if not url:
+            return None
+        try:
+            png = await asyncio.to_thread(
+                _render_leader_card,
+                url,
+                card.card_rarity_type,
+                card.attr,
+                user_card.get("level"),
+                user_card.get("masterRank", 0),
+                trained,
+            )
+        except Exception:
+            return None
+        _CARD_CACHE[key] = png
+        return png
+
     @event.command(name="leaderboard", description="View the current event's top 100.")
     @app_commands.autocomplete(region=autocompletes.pjsk_region(EVENT_REGIONS))
-    @app_commands.describe(region="Game server region.")
+    @app_commands.describe(region="Game server region.", rank="Jump to a rank (1-100).")
     async def leaderboard(
-        self, interaction: discord.Interaction, region: str = "default"
+        self,
+        interaction: discord.Interaction,
+        region: str = "default",
+        rank: int | None = None,
     ) -> None:
         await interaction.response.defer(thinking=True)
         resolved = await self._resolve_region(interaction, region)
@@ -199,39 +281,35 @@ class EventsCog(commands.Cog):
                 )
             )
             return
-        rankings = (data.top_100 or {}).get("rankings", [])
-        if not data.event_id or not rankings:
+        if not data.event_id or not (data.top_100 or {}).get("rankings"):
             await interaction.followup.send(
                 embed=embeds.error_embed("There's no active event right now.")
             )
             return
+        if rank is not None and not 1 <= rank <= 100:
+            await interaction.followup.send(
+                embed=embeds.error_embed("Pick a rank between 1 and 100.")
+            )
+            return
 
         event_obj = self.bot.pjsk.get_event(data.event_id)  # type: ignore[union-attr]
-        title = event_obj.name if event_obj else f"Event {data.event_id}"
-        pjsk_id = await self.bot.user_data.get_pjsk_id(interaction.user.id, resolved)  # type: ignore[union-attr]
-        per_page = 20
-        total_pages = max(1, (len(rankings) + per_page - 1) // per_page)
-
-        def render(page: int) -> discord.Embed:
-            start = (page - 1) * per_page
-            embed = embeds.embed(
-                title=f"{title} - Top 100 (Page {page})", color=discord.Color.purple()
-            )
-            lines = []
-            for r in rankings[start : start + per_page]:
-                you = "✅ " if r.get("userId") == pjsk_id else ""
-                name = tools.escape_md(str(r.get("name", "?")).replace("\n", " "))
-                lines.append(
-                    f"{you}**#{r.get('rank')}** - {name} — `{r.get('score', 0):,}`"
-                )
-            embed.description = "\n".join(lines)
-            embed.set_footer(
-                text=f"{resolved.upper()} - {data.event_status or ''} - updated {round(time.time() - data.updated)}s ago"
-            )
-            return embed
-
-        view = Paginator(render, total_pages, interaction.user.id)
-        await interaction.followup.send(embed=render(1), view=view)
+        view = _LeaderboardView(
+            cog=self,
+            region=resolved,
+            data=data,
+            event_name=event_obj.name if event_obj else f"Event {data.event_id}",
+            event_logo=event_obj.logo_url if event_obj else None,
+            event_id=data.event_id,
+            selections=self._lb_selections(resolved, data.event_id),
+            pjsk_id=await self.bot.user_data.get_pjsk_id(interaction.user.id, resolved),  # type: ignore[union-attr]
+            target=rank,
+            restrict_to=interaction.user.id,
+        )
+        if rank is not None:
+            view.page = (rank - 1) // _LB_PER_PAGE
+        embed, file = await view.render()
+        view.rebuild()
+        await interaction.followup.send(embed=embed, file=file, view=view)
         view.message = await interaction.original_response()
 
     @event.command(
@@ -372,6 +450,211 @@ class _ScheduleView(SbugaView):
         await interaction.followup.send(
             embed=await self.cog._vlive_embed(self.region), ephemeral=True
         )
+
+
+class _LBButton(discord.ui.Button):
+    """picks a leaderboard view (Overall / a chapter). Grayed out when it's the current view or
+    a chapter that hasn't started."""
+
+    def __init__(self, index: int, sel: _LBSel, current: bool, row: int) -> None:
+        available = sel.progressed and not current
+        super().__init__(
+            label=sel.label,
+            style=(
+                discord.ButtonStyle.primary
+                if available
+                else discord.ButtonStyle.secondary
+            ),
+            disabled=not available,
+            row=row,
+        )
+        self.index = index
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view: _LeaderboardView = self.view  # type: ignore[assignment]
+        view.selected = self.index
+        view.page = 0
+        await view.refresh(interaction)
+
+
+class _LeaderboardView(SbugaView):
+    """The rendered T100 leaderboard: paging, ALT/OFFSET toggles, and per-chapter views."""
+
+    def __init__(
+        self,
+        *,
+        cog: EventsCog,
+        region: str,
+        data,
+        event_name: str,
+        event_logo: str | None,
+        event_id: int,
+        selections: list[_LBSel],
+        pjsk_id: int | None,
+        target: int | None,
+        restrict_to: int,
+    ) -> None:
+        super().__init__(timeout=300, restrict_to=restrict_to)
+        self.cog = cog
+        self.region = region
+        self.data = data
+        self.event_name = event_name
+        self.event_logo = event_logo
+        self.event_id = event_id
+        self.selections = selections
+        self.pjsk_id = pjsk_id
+        self.target = target
+        self.selected = 0
+        self.page = 0
+        self.alt = False
+        self.offset = False
+        self._stats: dict[int, tuple] = {}  # selection index -> hour_stats result
+
+    # --- data ---
+
+    def _rows(self) -> list[dict]:
+        sel = self.selections[self.selected]
+        top = self.data.top_100 or {}
+        if not sel.is_chapter:
+            return top.get("rankings") or []
+        return next(
+            (
+                c.get("rankings") or []
+                for c in top.get("userWorldBloomChapterRankings", [])
+                if c.get("gameCharacterId") == sel.character_id
+            ),
+            [],
+        )
+
+    async def _hour_stats(self) -> tuple:
+        if self.selected not in self._stats:
+            sel = self.selections[self.selected]
+            rows = self._rows()
+            self._stats[self.selected] = await asyncio.to_thread(
+                lb.hour_stats,
+                iter_snapshots(self.region, self.event_id),
+                [r.get("userId") for r in rows],
+                sel.character_id,
+                sel.is_chapter,
+            )
+        return self._stats[self.selected]
+
+    # --- ui ---
+
+    def rebuild(self) -> None:
+        self.clear_items()
+        self.add_item(self.prev)
+        self.add_item(self.next)
+        self.add_item(self.alt_toggle)
+        self.add_item(self.offset_toggle)
+        if len(self.selections) > 1:  # world link only
+            for i, sel in enumerate(self.selections):
+                self.add_item(_LBButton(i, sel, i == self.selected, row=1 + i // 5))
+
+    async def refresh(self, interaction: discord.Interaction) -> None:
+        self._disable_all()
+        await interaction.response.edit_message(view=self)
+        embed, file = await self.render()
+        self._enable_all()
+        self.rebuild()
+        await interaction.edit_original_response(
+            embed=embed, attachments=[file], view=self
+        )
+
+    @discord.ui.button(emoji="⬅️", style=discord.ButtonStyle.secondary, row=0)
+    async def prev(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self.page = (self.page - 1) % self._pages()
+        await self.refresh(interaction)
+
+    @discord.ui.button(emoji="➡️", style=discord.ButtonStyle.secondary, row=0)
+    async def next(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self.page = (self.page + 1) % self._pages()
+        await self.refresh(interaction)
+
+    @discord.ui.button(
+        emoji="🔀", label="ALT", style=discord.ButtonStyle.secondary, row=0
+    )
+    async def alt_toggle(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self.alt = not self.alt
+        await self.refresh(interaction)
+
+    @discord.ui.button(
+        emoji="🔃", label="OFFSET", style=discord.ButtonStyle.secondary, row=0
+    )
+    async def offset_toggle(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        self.offset = not self.offset
+        await self.refresh(interaction)
+
+    def _pages(self) -> int:
+        return max(1, (len(self._rows()) + _LB_PER_PAGE - 1) // _LB_PER_PAGE)
+
+    # --- render ---
+
+    async def render(self) -> tuple[discord.Embed, discord.File]:
+        rows = self._rows()
+        games, last_score, baseline, baseline_ts = await self._hour_stats()
+
+        start = self.page * _LB_PER_PAGE + (10 if self.offset else 0)
+        total = len(rows)
+        window = [rows[(start + i) % total] for i in range(min(_LB_PER_PAGE, total))]
+
+        columns = ["Score/GH", "Games", "GPH"] if self.alt else ["Score", "Change Hr"]
+        out: list[lb.LBRow] = []
+        for r in window:
+            uid, score, rk = r.get("userId"), r.get("score") or 0, r.get("rank") or 0
+            played = games.get(uid, 0)
+            if last_score.get(uid) is not None and score > last_score[uid]:
+                played += 1  # they've scored since the newest snapshot
+            base = baseline.get(uid)
+            change = score - base[0] if base else None
+            gph = max(played - base[2], 0) if base else None
+            direction, places = _delta(base[1] - rk if base else 0)
+            if self.alt:
+                values = [
+                    f"{change / gph:,.2f}" if change is not None and gph else "N/A",
+                    f"{played:,}",
+                    f"{gph:,}" if gph is not None else "N/A",
+                ]
+            else:
+                values = [f"{score:,}", f"{change:,}" if change is not None else "N/A"]
+            out.append(
+                lb.LBRow(
+                    rank=f"T{rk}",
+                    delta_dir=direction,
+                    delta_n=places,
+                    card=await self.cog._lb_card(r.get("userCard") or {}),
+                    name=str(r.get("name") or "?").replace("\n", " ").strip() or "?",
+                    values=values,
+                    is_you=(uid is not None and uid == self.pjsk_id)
+                    or (self.target is not None and rk == self.target),
+                )
+            )
+
+        png = await asyncio.to_thread(lb.render_leaderboard, out, columns)
+        sel = self.selections[self.selected]
+        title = f"{self.event_name} - Top 100"
+        if sel.is_chapter:
+            title += f" ({sel.label})"
+        embed = embeds.embed(title=title, color=discord.Color.purple())
+        desc = f"**Updated:** <t:{int(self.data.updated)}:R>"
+        if baseline_ts:
+            desc += f"\n**Change since:** <t:{int(baseline_ts / 1000)}:R>"
+        embed.description = desc
+        if self.event_logo:
+            embed.set_thumbnail(url=self.event_logo)
+        embed.set_image(url="attachment://leaderboard.png")
+        embed.set_footer(
+            text=f"{self.region.upper()} - Page {self.page + 1}/{self._pages()} - {_LB_FOOTER}"
+        )
+        return embed, discord.File(io.BytesIO(png), "leaderboard.png")
 
 
 async def setup(bot: SbugaBot) -> None:

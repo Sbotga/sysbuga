@@ -138,13 +138,21 @@ class RankedCog(commands.Cog):
         )
         lines = []
         for ranking in rankings[start : start + per_page]:
-            gd0, _, _ = _grade_of(ranking)
-            head = gd0.split("\n")[0].replace("**", "")
+            details, _, _ = _grade_of(ranking)
+            # "**Master**\n♪ × 123" or "**Bronze** Class 3\n2/5" - show both halves
+            grade, points = details.split("\n")
             you = "✅ " if ranking["userId"] == pjsk_id else ""
             name = tools.escape_md(ranking["name"].replace("\n", " "))
-            line = f"{you}**#{ranking['rank']} - {name}** - {head}"
+            line = (
+                f"{you}**#{ranking['rank']} - {name}** - "
+                f"{grade.replace('**', '')} (`{points}`)"
+            )
             if str(ranking["userId"]) in cheaters:
-                line = f"```diff\n- CHEATER 🚩 {line.replace('**', '')}\n```"
+                # a diff block can't carry the bold or the backticks
+                line = (
+                    "```diff\n- CHEATER 🚩 "
+                    f"{line.replace('**', '').replace('`', '')}\n```"
+                )
             lines.append(line)
         lines.append(f"\n### Web View: <{RANKED_WEB_URL}>")
         embed.description = "\n".join(lines).strip()
