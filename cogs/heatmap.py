@@ -137,6 +137,14 @@ def _chapter_rank(data: CurrentEventResponse, key: int, cid: int | None) -> int 
     return None
 
 
+def _user_at_rank(data: CurrentEventResponse, rank: int) -> int | None:
+    """the user id currently sitting at overall rank `rank` in the live top 100"""
+    for row in (data.top_100 or {}).get("rankings", []):
+        if row.get("rank") == rank:
+            return row.get("userId")
+    return None
+
+
 async def _render_selection(
     state: _HeatmapState, sel: _Selection
 ) -> tuple[discord.Embed, discord.File]:
@@ -424,9 +432,36 @@ class HeatmapCog(commands.Cog):
             pass
         return username or row_name, thumb
 
+    async def _send_user_heatmap(
+        self,
+        interaction: discord.Interaction,
+        resolved: str,
+        tz: object,
+        tz_label: str,
+        tz_overridden: bool,
+        data: CurrentEventResponse,
+        uid: int,
+    ) -> None:
+        """Render a player's heatmap - shared by /heatmap user and /heatmap cutoff (which
+        resolves the tier to whoever is at that rank), so the two are identical."""
+        username, thumb = await self._user_identity(resolved, uid, data)
+        await self._send_heatmap(
+            interaction,
+            resolved,
+            tz,
+            tz_label,
+            tz_overridden,
+            data,
+            "user",
+            uid,
+            "",
+            username=username,
+            thumb_png=thumb,
+        )
+
     @heatmap_group.command(
         name="cutoff",
-        description="A tier's games-per-hour heatmap for the current event.",
+        description="The games-per-hour heatmap of the player currently at a tier.",
     )
     @app_commands.autocomplete(
         tier=_tier_autocomplete(_HEATMAP_MAX_TIER),
@@ -434,7 +469,7 @@ class HeatmapCog(commands.Cog):
         timezone=_timezone_autocomplete,
     )
     @app_commands.describe(
-        tier="Rank 1-100 (e.g. 5, 100, T100).",
+        tier="Rank 1-100 (e.g. 5, 100, T100) - the player currently there.",
         region="Game server region.",
         timezone="Timezone for the hours/days (defaults to your setting, or ET).",
     )
@@ -459,16 +494,14 @@ class HeatmapCog(commands.Cog):
                 )
             )
             return
-        await self._send_heatmap(
-            interaction,
-            resolved,
-            tz,
-            tz_label,
-            tz_overridden,
-            data,
-            "cutoff",
-            parsed,
-            f"T{parsed}",
+        uid = _user_at_rank(data, parsed)
+        if uid is None:
+            await interaction.followup.send(
+                embed=embeds.error_embed(f"No one is at T{parsed} right now.")
+            )
+            return
+        await self._send_user_heatmap(
+            interaction, resolved, tz, tz_label, tz_overridden, data, int(uid)
         )
 
     @heatmap_group.command(
@@ -512,20 +545,8 @@ class HeatmapCog(commands.Cog):
                 embed=embeds.error_embed("Invalid user ID.")
             )
             return
-        uid = int(user_id)
-        username, thumb = await self._user_identity(resolved, uid, data)
-        await self._send_heatmap(
-            interaction,
-            resolved,
-            tz,
-            tz_label,
-            tz_overridden,
-            data,
-            "user",
-            uid,
-            "",
-            username=username,
-            thumb_png=thumb,
+        await self._send_user_heatmap(
+            interaction, resolved, tz, tz_label, tz_overridden, data, int(user_id)
         )
 
 
