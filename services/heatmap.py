@@ -468,7 +468,7 @@ def render_heatmap(
                     (x0 + cell / 2, y0 + cell / 2),
                     f"{value}+" if plus else str(value),
                     font=zero_font,
-                    fill=_NPLUS_BLUE if plus else text_color,
+                    fill=text_color,  # the "+" marks it; a tinted number is unreadable here
                     anchor="mm",
                 )
                 if pd:  # partial data - yellow asterisk, top-right
