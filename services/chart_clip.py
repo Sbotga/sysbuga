@@ -41,6 +41,11 @@ easter_eggs = [
         "description": "The note speed is 1 now...",
     },
     {
+        "chance": 0.01,  # 1% chance
+        "settings": {"pvStageCover": 0.5},
+        "description": "Good luck with half the lane covered",
+    },
+    {
         "chance": 0.03,  # 3% chance
         "settings": {
             "pvWrongWayEnglish": False,

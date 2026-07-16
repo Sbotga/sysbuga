@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from main import SbugaBot
 
 GACHA_REGIONS = ["en", "jp", "tw", "kr"]
-COOLDOWN = 20
 
 # the 3rd-anniversary result screen debuted with song "NEO" (music id 366), which released on
 # a different date per region - banners from that date on use the 3rd-anni style, earlier ones 1st
@@ -257,7 +256,6 @@ class _RerollView(SbugaView):
 class GachaCog(commands.Cog):
     def __init__(self, bot: SbugaBot) -> None:
         self.bot = bot
-        self.cooldowns: dict[int, float] = {}
 
     def _is_event_banner(self, gacha: Gacha) -> bool:
         """True for an Event / Limited Event banner: a spark ('ceil') gacha at the standard
@@ -448,20 +446,11 @@ class GachaCog(commands.Cog):
     ) -> None:
         region = region.lower().strip()
         if region == "default":
-            region = await self.bot.user_data.get_settings(interaction.user.id, "default_region")  # type: ignore[union-attr]
+            region = await self.bot.user_data.get_settings(
+                interaction.user.id, "default_region"
+            )  # type: ignore[union-attr]
         if region not in GACHA_REGIONS:
             region = "en"
-
-        cooldown_end = self.cooldowns.get(interaction.user.id, 0) + COOLDOWN
-        if cooldown_end > time.time():
-            await interaction.response.send_message(
-                embed=embeds.error_embed(
-                    f"You recently pulled. Try again <t:{int(cooldown_end)}:R>."
-                ),
-                ephemeral=True,
-            )
-            return
-        self.cooldowns[interaction.user.id] = time.time()
 
         await interaction.response.defer(thinking=True)
         gacha = self._get_gacha(region, banner)

@@ -114,18 +114,26 @@ def _compose_deck(
     asterisk_cids: set[int],
     asterisk_average: bool,
     cr_ranks: dict[int, int],
+    annotate: bool = True,
 ) -> bytes:
     """Lay the pre-rendered deck cards in a row on the heatmap background with a header
     (deck no. + name on the left, username + leader thumbnail on the right), a
     "Skill Level: n" caption under each card (plus "CR n" for character-rank cards),
     and a region footer. Encore (random-average) cards get a * on their score,
-    explained by a note above the footer. No network."""
+    explained by a note above the footer. No network.
+
+    `annotate=False` drops everything we letter on top of the cards - the skill level, the
+    score, the CR line and the asterisk note - leaving the deck itself (/pjsk deck). The
+    card art is untouched either way; that comes rendered from sekai_images."""
     imgs = [Image.open(io.BytesIO(p)).convert("RGBA") for p in card_pngs]
     cw = max(i.width for i in imgs)
     ch = max(i.height for i in imgs)
     header_h = 170
-    label_h = 158 if cr_ranks else 108
-    note_h = 68 if asterisk_cids else 0
+    if not annotate:
+        label_h, note_h = _DECK_PAD, 0
+    else:
+        label_h = 158 if cr_ranks else 108
+        note_h = 68 if asterisk_cids else 0
     footer_h = 56
     width = _DECK_PAD + len(imgs) * (cw + _DECK_PAD)
     height = header_h + ch + label_h + note_h + footer_h
@@ -175,6 +183,9 @@ def _compose_deck(
     label_top = header_h + ch + 6
     for img, cid in zip(imgs, card_cids):
         canvas.alpha_composite(img, (x, header_h))
+        if not annotate:
+            x += cw + _DECK_PAD
+            continue
         cx = x + cw // 2
         draw.text(
             (cx, label_top),
@@ -200,7 +211,7 @@ def _compose_deck(
             )
         x += cw + _DECK_PAD
 
-    if asterisk_cids:
+    if asterisk_cids and annotate:
         avg = "an average" if asterisk_average else "not an average"
         draw.text(
             (_DECK_PAD, header_h + ch + label_h + (note_h - 46) // 2),
@@ -370,6 +381,64 @@ class _ChangeSLModal(discord.ui.Modal, title="Change Skill Levels"):
         embed, files = await self._view.render()
         await interaction.response.edit_message(
             embed=embed, attachments=files, view=self._view
+        )
+
+
+class _DeckView(SbugaView):
+    """/pjsk deck - just a refresh, since the deck image has nothing to drill into"""
+
+    def __init__(
+        self,
+        *,
+        cog: InfoCog,
+        author_id: int,
+        user_id: str,
+        region: str,
+        data: _ISVData,
+    ) -> None:
+        super().__init__(restrict_to=author_id, timeout=300)
+        self.cog = cog
+        self.user_id = user_id
+        self.region = region
+        self.data = data
+
+    @discord.ui.button(emoji="🔄", label="Refresh", style=discord.ButtonStyle.danger)
+    async def refresh(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        # swap to a loading state (buttons disabled) immediately so it's clear it's working
+        self._disable_all()
+        await interaction.response.edit_message(
+            embed=embeds.embed(
+                title=f"{self.data.username} - Deck", description="🔄 Refreshing..."
+            ),
+            attachments=[],
+            view=self,
+        )
+        try:
+            self.data = await self.cog._isv_build(
+                self.user_id, self.region, self.data.is_self, fresh=True
+            )
+        except SbugaNotFound:
+            self._enable_all()
+            await interaction.edit_original_response(
+                embed=embeds.error_embed(
+                    f"Couldn't find that profile in the {self.region.upper()} server."
+                ),
+                view=self,
+            )
+            return
+        except SbugaError as e:
+            self._enable_all()
+            await interaction.edit_original_response(
+                embed=embeds.error_embed(f"Couldn't refresh: {e.detail or e.status}"),
+                view=self,
+            )
+            return
+        self._enable_all()
+        embed, files = await asyncio.to_thread(self.cog._deck_render, self.data)
+        await interaction.edit_original_response(
+            embed=embed, attachments=files, view=self
         )
 
 
@@ -1298,7 +1367,9 @@ class InfoCog(commands.Cog):
         await interaction.response.defer(thinking=True)
         region = region.lower().strip()
         if region == "default":
-            region = await self.bot.user_data.get_settings(interaction.user.id, "default_region")  # type: ignore[union-attr]
+            region = await self.bot.user_data.get_settings(
+                interaction.user.id, "default_region"
+            )  # type: ignore[union-attr]
         if region not in ("en", "jp"):
             region = "en"
 
@@ -1347,7 +1418,9 @@ class InfoCog(commands.Cog):
         await interaction.response.defer(thinking=True)
         region = region.lower().strip()
         if region == "default":
-            region = await self.bot.user_data.get_settings(interaction.user.id, "default_region")  # type: ignore[union-attr]
+            region = await self.bot.user_data.get_settings(
+                interaction.user.id, "default_region"
+            )  # type: ignore[union-attr]
         if region not in PJSK_REGIONS:
             await interaction.followup.send(
                 embed=embeds.error_embed(f"Region `{region.upper()}` isn't supported.")
@@ -1429,6 +1502,125 @@ class InfoCog(commands.Cog):
         else:
             await interaction.followup.send(embed=embed)
 
+    def _deck_render(self, d: "_ISVData") -> tuple[discord.Embed, list[discord.File]]:
+        """the plain deck: the same image /pjsk isv builds, minus everything we letter on
+        top of the cards, and a title-only embed"""
+        embed = embeds.embed(title=f"{d.username} - Deck", color=discord.Color.purple())
+        embed.set_footer(
+            text=f"{d.region.upper()} - updated {round(time.time() - d.updated)}s ago"
+        )
+        files: list[discord.File] = []
+        if d.thumb_png:
+            embed.set_thumbnail(url="attachment://leader.png")
+            files.append(discord.File(io.BytesIO(d.thumb_png), "leader.png"))
+        if d.card_pngs:
+            # no ISV math at all here - the scores, asterisks and character ranks only exist
+            # to explain a number this command doesn't show
+            deck_png = _compose_deck(
+                d.card_pngs,
+                d.card_cids,
+                d.skill_levels,
+                {},
+                d.deck_no,
+                d.deck_name,
+                d.username,
+                d.region,
+                d.thumb_png,
+                self.bot.config["discord"].get("name") or "Sbuga",
+                set(),
+                False,
+                {},
+                False,
+            )
+            embed.set_image(url="attachment://deck.png")
+            files.append(discord.File(io.BytesIO(deck_png), "deck.png"))
+        return embed, files
+
+    async def _deck_target(
+        self, interaction: discord.Interaction, user_id: str | None, region: str
+    ) -> tuple[str, str, bool] | None:
+        """(user id, region, is_self) for the deck commands, or None once the error is sent"""
+        region = region.lower().strip()
+        if region == "default":
+            region = await self.bot.user_data.get_settings(
+                interaction.user.id, "default_region"
+            )  # type: ignore[union-attr]
+        if region not in PJSK_REGIONS:
+            await interaction.followup.send(
+                embed=embeds.error_embed(f"Region `{region.upper()}` isn't supported.")
+            )
+            return None
+
+        linked = await self.bot.user_data.get_pjsk_id(interaction.user.id, region)  # type: ignore[union-attr]
+        if not user_id:
+            if not linked:
+                await interaction.followup.send(
+                    embed=embeds.error_embed(
+                        f"Link your {region.upper()} PJSK account, or pass a user ID."
+                    )
+                )
+                return None
+            user_id = str(linked)
+        if not user_id.isdigit():
+            await interaction.followup.send(
+                embed=embeds.error_embed("Invalid user ID.")
+            )
+            return None
+        return user_id, region, str(linked) == user_id
+
+    async def _fetch_deck(
+        self, interaction: discord.Interaction, user_id: str, region: str, is_self: bool
+    ) -> "_ISVData | None":
+        """the profile's deck, or None once the error is sent"""
+        try:
+            return await self._isv_build(user_id, region, is_self, fresh=False)
+        except SbugaNotFound:
+            await interaction.followup.send(
+                embed=embeds.error_embed(
+                    f"Couldn't find that profile in the {region.upper()} server."
+                )
+            )
+        except SbugaError as e:
+            await interaction.followup.send(
+                embed=embeds.error_embed(
+                    f"Couldn't fetch profile: {e.detail or e.status}"
+                )
+            )
+        return None
+
+    @pjsk.command(name="deck", description="View a PJSK profile's deck.")
+    @app_commands.allowed_installs(guilds=True, users=True)
+    @app_commands.autocomplete(region=autocompletes.pjsk_region(PJSK_REGIONS))
+    @app_commands.describe(
+        user_id="PJSK user ID (omit to use your linked account).",
+        region="Game server region.",
+    )
+    async def deck(
+        self,
+        interaction: discord.Interaction,
+        user_id: str | None = None,
+        region: str = "default",
+    ) -> None:
+        await interaction.response.defer(thinking=True)
+        target = await self._deck_target(interaction, user_id, region)
+        if target is None:
+            return
+        resolved_id, region, is_self = target
+        d = await self._fetch_deck(interaction, resolved_id, region, is_self)
+        if d is None:
+            return
+
+        embed, files = await asyncio.to_thread(self._deck_render, d)
+        view = _DeckView(
+            cog=self,
+            author_id=interaction.user.id,
+            user_id=resolved_id,
+            region=region,
+            data=d,
+        )
+        await interaction.followup.send(embed=embed, files=files, view=view)
+        view.message = await interaction.original_response()
+
     @pjsk.command(name="isv", description="View a PJSK profile's deck ISV.")
     @app_commands.allowed_installs(guilds=True, users=True)
     @app_commands.autocomplete(region=autocompletes.pjsk_region(PJSK_REGIONS))
@@ -1443,47 +1635,12 @@ class InfoCog(commands.Cog):
         region: str = "default",
     ) -> None:
         await interaction.response.defer(thinking=True)
-        region = region.lower().strip()
-        if region == "default":
-            region = await self.bot.user_data.get_settings(interaction.user.id, "default_region")  # type: ignore[union-attr]
-        if region not in PJSK_REGIONS:
-            await interaction.followup.send(
-                embed=embeds.error_embed(f"Region `{region.upper()}` isn't supported.")
-            )
+        target = await self._deck_target(interaction, user_id, region)
+        if target is None:
             return
-
-        linked = await self.bot.user_data.get_pjsk_id(interaction.user.id, region)  # type: ignore[union-attr]
-        if not user_id:
-            if not linked:
-                await interaction.followup.send(
-                    embed=embeds.error_embed(
-                        f"Link your {region.upper()} PJSK account, or pass a user ID."
-                    )
-                )
-                return
-            user_id = str(linked)
-        if not user_id.isdigit():
-            await interaction.followup.send(
-                embed=embeds.error_embed("Invalid user ID.")
-            )
-            return
-
-        is_self = str(linked) == user_id
-        try:
-            data = await self._isv_build(user_id, region, is_self, fresh=False)
-        except SbugaNotFound:
-            await interaction.followup.send(
-                embed=embeds.error_embed(
-                    f"Couldn't find that profile in the {region.upper()} server."
-                )
-            )
-            return
-        except SbugaError as e:
-            await interaction.followup.send(
-                embed=embeds.error_embed(
-                    f"Couldn't fetch profile: {e.detail or e.status}"
-                )
-            )
+        user_id, region, is_self = target
+        data = await self._fetch_deck(interaction, user_id, region, is_self)
+        if data is None:
             return
 
         view = _ISVView(
