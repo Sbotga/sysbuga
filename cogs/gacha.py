@@ -156,10 +156,10 @@ def _build_card_tile_3rd(art: bytes, rarity: str, attr: str | None) -> Image.Ima
     tile.alpha_composite(frame)
 
     if attr:
-        icon = (
-            Image.open(f"{ASSETS}/emojis/icon_attribute_{attr}.png")
-            .convert("RGBA")
-            .resize((88, 88), Image.Resampling.LANCZOS)
+        # the result screen's own icon, not the emoji one - it ships at 88x92, so pasting it
+        # at native size rather than squaring it off
+        icon = Image.open(f"{_ANNI3_ASSETS}/icon_attribute_{attr}_88.png").convert(
+            "RGBA"
         )
         tile.alpha_composite(icon, (812, 0))
 

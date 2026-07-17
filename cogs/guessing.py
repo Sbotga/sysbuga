@@ -355,12 +355,23 @@ class GuessCog(commands.Cog):
         # fallback when the clip renderer isn't installed using the old cropped-chart round
         difficulty = chart_clip.DIFFICULTIES[mode]
         for _ in range(_ASSET_ATTEMPTS):
-            music = chart_clip.weighted_chart_music(self.bot.pjsk.released_musics(), difficulty)  # type: ignore[union-attr]
+            music = chart_clip.weighted_chart_music(
+                self.bot.pjsk.released_musics(), difficulty
+            )  # type: ignore[union-attr]
             if not music:
                 return None
-            region = next((r for r in self.bot.pjsk.regions_for_music(music.id) if r in ("en", "jp")), "en")  # type: ignore[union-attr]
+            region = next(
+                (
+                    r
+                    for r in self.bot.pjsk.regions_for_music(music.id)
+                    if r in ("en", "jp")
+                ),
+                "en",
+            )  # type: ignore[union-attr]
             try:
-                png = await self.bot.sbuga.get_chart_image(music.id, difficulty, region, mirrored=False)  # type: ignore[union-attr,arg-type]
+                png = await self.bot.sbuga.get_chart_image(
+                    music.id, difficulty, region, mirrored=False
+                )  # type: ignore[union-attr,arg-type]
             except SbugaError:
                 continue
             return music, png, difficulty
@@ -374,9 +385,14 @@ class GuessCog(commands.Cog):
         return raw.decode("utf-8", "replace") if raw else None
 
     async def _chart_reveal_png(self, music_id: int, difficulty: str) -> bytes | None:
-        region = next((r for r in self.bot.pjsk.regions_for_music(music_id) if r in ("en", "jp")), "en")  # type: ignore[union-attr]
+        region = next(
+            (r for r in self.bot.pjsk.regions_for_music(music_id) if r in ("en", "jp")),
+            "en",
+        )  # type: ignore[union-attr]
         try:
-            return await self.bot.sbuga.get_chart_image(music_id, difficulty, region, mirrored=False)  # type: ignore[union-attr,arg-type]
+            return await self.bot.sbuga.get_chart_image(
+                music_id, difficulty, region, mirrored=False
+            )  # type: ignore[union-attr,arg-type]
         except SbugaError:
             return None
 
@@ -399,10 +415,19 @@ class GuessCog(commands.Cog):
     async def _render_chart_clip_live(self, mode: str):
         difficulty = chart_clip.DIFFICULTIES[mode]
         for _ in range(_CHART_CLIP_ATTEMPTS):
-            music = chart_clip.weighted_chart_music(self.bot.pjsk.released_musics(), difficulty)  # type: ignore[union-attr]
+            music = chart_clip.weighted_chart_music(
+                self.bot.pjsk.released_musics(), difficulty
+            )  # type: ignore[union-attr]
             if not music:
                 return None
-            region = next((r for r in self.bot.pjsk.regions_for_music(music.id) if r in ("en", "jp")), "en")  # type: ignore[union-attr]
+            region = next(
+                (
+                    r
+                    for r in self.bot.pjsk.regions_for_music(music.id)
+                    if r in ("en", "jp")
+                ),
+                "en",
+            )  # type: ignore[union-attr]
             sus_text = await self._fetch_chart_sus(music.id, difficulty, region)
             if not sus_text:
                 continue
@@ -616,7 +641,9 @@ class GuessCog(commands.Cog):
                 embed=embeds.error_embed("A guessing game is already happening here!")
             )
             return False
-        if interaction.guild and not await self.bot.user_data.guessing_enabled(interaction.guild_id):  # type: ignore[union-attr,arg-type]
+        if interaction.guild and not await self.bot.user_data.guessing_enabled(
+            interaction.guild_id
+        ):  # type: ignore[union-attr,arg-type]
             await interaction.followup.send(
                 embed=embeds.error_embed("Guessing is disabled in this server.")
             )
@@ -707,7 +734,9 @@ class GuessCog(commands.Cog):
 
     async def _finalize_period(self, period_type: str, index: int) -> None:
         prize_map = WEEKLY_PRIZES if period_type == "weekly" else MONTHLY_PRIZES
-        top = await self.bot.user_data.get_points_top(period_type, index, max(prize_map))  # type: ignore[union-attr]
+        top = await self.bot.user_data.get_points_top(
+            period_type, index, max(prize_map)
+        )  # type: ignore[union-attr]
         winners = [
             (row["discord_id"], rank, *prize_map[rank])
             for rank, row in enumerate(top, start=1)
@@ -716,7 +745,9 @@ class GuessCog(commands.Cog):
         expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
             days=PRIZE_CLAIM_DAYS
         )
-        created = await self.bot.user_data.finalize_period(period_type, index, winners, expires_at)  # type: ignore[union-attr]
+        created = await self.bot.user_data.finalize_period(
+            period_type, index, winners, expires_at
+        )  # type: ignore[union-attr]
         for prize in created:
             await self._dm_prize(prize)
 
@@ -786,7 +817,9 @@ class GuessCog(commands.Cog):
         points = _guess_points(mode, _hints_taken(mode, data["data"]))
         if points is None:
             return None
-        if await self.bot.user_data.get_settings(user_id, "opt_out_rolling_guess_leaderboards"):  # type: ignore[union-attr]
+        if await self.bot.user_data.get_settings(
+            user_id, "opt_out_rolling_guess_leaderboards"
+        ):  # type: ignore[union-attr]
             return None
         hour_count, day_count = data.get("_rate", (0, 0))
         if _over_guess_limit(data["data"].get("attempts", 0), hour_count, day_count):
@@ -809,7 +842,9 @@ class GuessCog(commands.Cog):
             description += f"\n**Card:** {data['data']['card_name']}"
         points = None
         if data["guessing"]:
-            await self.bot.user_data.add_guesses(message.author.id, data["guessing"], "success")  # type: ignore[union-attr]
+            await self.bot.user_data.add_guesses(
+                message.author.id, data["guessing"], "success"
+            )  # type: ignore[union-attr]
             points = await self._award_points(message.author.id, data)
         if points:
             description += (
@@ -830,7 +865,9 @@ class GuessCog(commands.Cog):
 
     async def _record_fail(self, message: discord.Message, data: dict) -> None:
         if data["guessing"]:
-            await self.bot.user_data.add_guesses(message.author.id, data["guessing"], "fail")  # type: ignore[union-attr]
+            await self.bot.user_data.add_guesses(
+                message.author.id, data["guessing"], "fail"
+            )  # type: ignore[union-attr]
 
     async def _check_song(
         self, message: discord.Message, data: dict, content: str
@@ -944,7 +981,9 @@ class GuessCog(commands.Cog):
         # cached once per round so guess checking doesn't hit the db each guess; off unless this
         # channel is a leak channel, and then a guess that resolves to a leak is hidden so we
         # never reveal an unreleased title
-        allow_leaks = await self.bot.user_data.channel_leaks_allowed(interaction.channel_id)  # type: ignore[union-attr,arg-type]
+        allow_leaks = await self.bot.user_data.channel_leaks_allowed(
+            interaction.channel_id
+        )  # type: ignore[union-attr,arg-type]
         guess: dict[str, Any] = {
             "guessers": set(),  # user ids who've made a guess and are needed to give up
             "host": interaction.user.id,  # the starter can give up without guessing
@@ -1173,7 +1212,9 @@ class GuessCog(commands.Cog):
             guess["answer"] = char.id
             guess["answerName"] = character_display_name(char)
             guess["answer_file_path"] = io.BytesIO(art)
-            guess["data"]["card_name"] = self.bot.pjsk.card_display_name(card, use_emojis=True, trained=trained)  # type: ignore[union-attr]
+            guess["data"]["card_name"] = self.bot.pjsk.card_display_name(
+                card, use_emojis=True, trained=trained
+            )  # type: ignore[union-attr]
             guess["data"]["card_id"] = card.id
             guess["data"]["trained"] = trained
             guess["data"]["rarity"] = card.card_rarity_type
@@ -1230,7 +1271,9 @@ class GuessCog(commands.Cog):
             data["event_attribute"] = (
                 event.bonus_attribute
             )  # raw, for the attribute emoji
-            data["event_unit"] = await event_story.unit_display(self.bot.sbuga, event.id)  # type: ignore[arg-type]
+            data["event_unit"] = await event_story.unit_display(
+                self.bot.sbuga, event.id
+            )  # type: ignore[arg-type]
             desc = await event_story.event_outline(self.bot.sbuga, event.id)  # type: ignore[arg-type]
             # only a third of the description is revealed, the rest masked
             data["event_desc"] = _masked_name(desc, EVENT_DESC_FRACTION) if desc else ""
@@ -1383,7 +1426,9 @@ class GuessCog(commands.Cog):
     @guess.command(name="end", description="End the active guess in this channel.")
     async def end(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(thinking=True)
-        embed, files, view = await self._resolve_end(interaction.channel.id, interaction.user.id)  # type: ignore[union-attr]
+        embed, files, view = await self._resolve_end(
+            interaction.channel.id, interaction.user.id
+        )  # type: ignore[union-attr]
         msg = await interaction.followup.send(
             embed=embed, files=files, view=view or discord.utils.MISSING
         )
@@ -1579,7 +1624,7 @@ class GuessCog(commands.Cog):
                 else:
                     lines.append(
                         f"The song is level **`{level}`** on "
-                        f"{emojis.difficulty_colors[diff]} **{diff.title()}** (on JP server)."
+                        f"{emojis.difficulty_colors[diff]} **{diff.title()}** (latest rating if rerated)."
                     )
             if stage >= 2:
                 lines.append(f"The name has **`{len(name)}`** characters.")
@@ -1682,13 +1727,17 @@ class GuessCog(commands.Cog):
         embed, files, counted = await self._resolve_hint(data)
         await interaction.followup.send(embed=embed, files=files)
         if counted and data["guessing"]:
-            await self.bot.user_data.add_guesses(interaction.user.id, data["guessing"], "hint")  # type: ignore[union-attr]
+            await self.bot.user_data.add_guesses(
+                interaction.user.id, data["guessing"], "hint"
+            )  # type: ignore[union-attr]
 
     async def _chat_hint(self, message: discord.Message, data: dict) -> None:
         embed, files, counted = await self._resolve_hint(data)
         await message.reply(embed=embed, files=files)
         if counted and data["guessing"]:
-            await self.bot.user_data.add_guesses(message.author.id, data["guessing"], "hint")  # type: ignore[union-attr]
+            await self.bot.user_data.add_guesses(
+                message.author.id, data["guessing"], "hint"
+            )  # type: ignore[union-attr]
 
     # guessing_enabled still applies (see channel_checks) but is immutable for now, so no
     # toggle command is exposed
@@ -1726,7 +1775,9 @@ class GuessCog(commands.Cog):
     ) -> None:
         await interaction.response.defer(thinking=True)
         per_page = GUESS_LEADERBOARD_PER_PAGE
-        page_rows, _, _, total_pages = await self.bot.user_data.get_guesses_leaderboard(mode, 1, interaction.user.id)  # type: ignore[union-attr]
+        page_rows, _, _, total_pages = await self.bot.user_data.get_guesses_leaderboard(
+            mode, 1, interaction.user.id
+        )  # type: ignore[union-attr]
         if not page_rows:
             await interaction.followup.send(
                 embed=embeds.error_embed("No leaderboard data for that mode yet.")
@@ -1734,7 +1785,9 @@ class GuessCog(commands.Cog):
             return
 
         async def fetch_page(page: int):
-            return await self.bot.user_data.get_guesses_leaderboard(mode, page, interaction.user.id)  # type: ignore[union-attr]
+            return await self.bot.user_data.get_guesses_leaderboard(
+                mode, page, interaction.user.id
+            )  # type: ignore[union-attr]
 
         def render_rows(rows, page: int) -> discord.Embed:
             embed = embeds.embed(
@@ -1781,7 +1834,9 @@ class GuessCog(commands.Cog):
             reset = periods.next_month_reset()
             title = f"Monthly Leaderboard - Month {index}"
         per_page = GUESS_LEADERBOARD_PER_PAGE
-        rows, rank_row, total_pages = await self.bot.user_data.get_points_leaderboard(period_type, index, 1, interaction.user.id)  # type: ignore[union-attr]
+        rows, rank_row, total_pages = await self.bot.user_data.get_points_leaderboard(
+            period_type, index, 1, interaction.user.id
+        )  # type: ignore[union-attr]
         if not rows:
             await interaction.followup.send(
                 embed=embeds.error_embed(
@@ -1789,7 +1844,10 @@ class GuessCog(commands.Cog):
                 )
             )
             return
-        has_prizes = _prizes_enabled() and await self.bot.user_data.has_claimable_prizes(interaction.user.id)  # type: ignore[union-attr]
+        has_prizes = (
+            _prizes_enabled()
+            and await self.bot.user_data.has_claimable_prizes(interaction.user.id)
+        )  # type: ignore[union-attr]
 
         def render(page_rows, page: int) -> discord.Embed:
             embed = embeds.embed(title=title, color=discord.Color.gold())
@@ -1817,7 +1875,9 @@ class GuessCog(commands.Cog):
     async def _breakdown_embed(
         self, user_id: int, period_type: str, period_index: int
     ) -> discord.Embed:
-        breakdown = await self.bot.user_data.get_points_breakdown(user_id, period_type, period_index)  # type: ignore[union-attr]
+        breakdown = await self.bot.user_data.get_points_breakdown(
+            user_id, period_type, period_index
+        )  # type: ignore[union-attr]
         label = "Week" if period_type == "weekly" else "Month"
         embed = embeds.embed(
             title=f"{label} {period_index} Points", color=discord.Color.gold()
@@ -1989,7 +2049,9 @@ class GuessCog(commands.Cog):
     ) -> None:
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
-        claimed = await self.bot.user_data.claim_prize(prize_id, interaction.user.id, pjsk_id)  # type: ignore[union-attr]
+        claimed = await self.bot.user_data.claim_prize(
+            prize_id, interaction.user.id, pjsk_id
+        )  # type: ignore[union-attr]
         if not claimed:
             await interaction.followup.send(
                 embed=embeds.error_embed("This prize can no longer be claimed."),
@@ -2468,7 +2530,9 @@ class _ForfeitConfirmView(SbugaView):
     async def forfeit(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        ok = await self.cog.bot.user_data.forfeit_prize(self.prize_id, interaction.user.id)  # type: ignore[union-attr]
+        ok = await self.cog.bot.user_data.forfeit_prize(
+            self.prize_id, interaction.user.id
+        )  # type: ignore[union-attr]
         self._disable_all()
         text = (
             f"Forfeited your **{self.label}** prize."

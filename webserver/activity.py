@@ -625,7 +625,7 @@ def _tier_content(meta: dict[str, Any], stage: int) -> tuple[list[str], str | No
             lines.append(
                 f"This song doesn't have a {diff} chart."
                 if lvl is None
-                else f"The song is level {lvl} on {diff} (on JP server)."
+                else f"The song is level {lvl} on {diff} (latest rating if rerated)."
             )
         if stage >= 2:
             lines.append(f"The name has {len(name)} characters.")
