@@ -72,17 +72,16 @@ GUESS_POINTS: dict[str, dict[str, Any]] = {
     "event": {"start": 7000, "deductions": (1000, 1500, 2000, 2250)},
 }
 # prize per placement -> (paid crystals, free crystals); only listed ranks win
-WEEKLY_PRIZES: dict[int, tuple[int, int]] = {1: (350, 20), 2: (110, 5), 3: (50, 0)}
+WEEKLY_PRIZES: dict[int, tuple[int, int]] = {1: (110, 5), 2: (50, 0)}
 MONTHLY_PRIZES: dict[int, tuple[int, int]] = {
-    1: (1800, 90),
-    2: (950, 50),
-    3: (350, 20),
-    4: (110, 5),
-    **{r: (50, 0) for r in range(5, 11)},
+    1: (950, 50),
+    2: (350, 20),
+    3: (110, 5),
+    **{r: (50, 0) for r in range(4, 8)},
 }
 # a top finish this deep is DM'd that they placed
-WEEKLY_DM_TOP = 3
-MONTHLY_DM_TOP = 10
+WEEKLY_DM_TOP = 2
+MONTHLY_DM_TOP = 7
 
 # guess-attempt caps beyond which a correct guess earns 0 points. the per-round cap is shared by
 # everyone guessing that round; the hourly/daily caps are per user, spanning the bot and activity
