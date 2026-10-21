@@ -56,7 +56,7 @@ def _alias_field(values: list[str]) -> str:
 
 def _extract_bpms(sus_text: str) -> list[float]:
     """distinct consecutive bpm values across a chart, in order (runs in a worker process)"""
-    from sonolus_converters import sus
+    from rg_converters.converters import sus
 
     score = sus.load(StringIO(sus_text))
     out: list[float] = []

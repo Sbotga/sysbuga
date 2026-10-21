@@ -11,8 +11,8 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
-from sonolus_converters import sus
-from sonolus_converters.LevelData import next_sekai
+from rg_converters.converters import sus
+from rg_converters.converters.LevelData import next_sekai
 
 from services import chart_preview
 
