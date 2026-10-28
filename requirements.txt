@@ -51,7 +51,7 @@ zstandard
 # websockets
 websockets
 # chart clip rendering (sus cut + LevelData export for /guess chart)
-rg-converters
+rg-converters>=3.0.0
 
 # timezone database for zoneinfo (heatmap hour/day bucketing); Windows lacks a system one
 tzdata

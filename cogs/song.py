@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from io import BytesIO, StringIO
+from io import BytesIO
 from typing import TYPE_CHECKING, Literal
 
 import aiohttp
@@ -56,9 +56,9 @@ def _alias_field(values: list[str]) -> str:
 
 def _extract_bpms(sus_text: str) -> list[float]:
     """distinct consecutive bpm values across a chart, in order (runs in a worker process)"""
-    from rg_converters.converters import sus
+    from rg_converters.format import sus
 
-    score = sus.load(StringIO(sus_text))
+    score = sus.loads(sus_text)
     out: list[float] = []
     for note in sorted(
         (n for n in score.notes if getattr(n, "type", "") == "bpm"),

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import random
 import shutil
@@ -11,8 +10,9 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
-from rg_converters.converters import sus
-from rg_converters.converters.LevelData import next_sekai
+from rg_converters import transforms
+from rg_converters.format import sus
+from rg_converters.format.sonolus_leveldata import next_sekai
 
 from services import chart_preview
 
@@ -114,9 +114,9 @@ _TICKS_PER_BEAT = 480
 
 
 def cut_window(sus_text: str) -> "Window | None":
-    """pick a random window with enough content or none if nothing qualifies
-    cut mutates the score so each attempt reloads from the sus text"""
-    base = sus.load(io.StringIO(sus_text))  # untouched for the pre-cut tempo map
+    """pick a random window with enough content or none if nothing qualifies"""
+    # cut leaves it untouched, so it keeps the pre-cut tempo map
+    base = sus.loads(sus_text)
     if base.duration <= MIN_START:
         return None
 
@@ -129,18 +129,20 @@ def cut_window(sus_text: str) -> "Window | None":
         start_lo, start_hi = MIN_START, latest_start
 
     for _ in range(WINDOW_ATTEMPTS):
-        score = sus.load(io.StringIO(sus_text))
         start = random.uniform(start_lo, start_hi)
-        starting_combo, (start_tick, end_tick) = score.cut(start, start + CLIP_SECONDS)
+        score, starting_combo, (start_tick, end_tick) = transforms.cut(
+            base, start, start + CLIP_SECONDS
+        )
         if score.combo_count < MIN_COMBO or score.note_count < MIN_NOTES:
             continue
         # exact audio window from the ticks cut snapped to off the original tempo
         audio_start = base.time_at_beat(start_tick / _TICKS_PER_BEAT)
         audio_end = base.time_at_beat(end_tick / _TICKS_PER_BEAT)
-        buffer = io.BytesIO()
-        next_sekai.export(buffer, score, as_compressed=True)
+        leveldata, _ = next_sekai.dumps(
+            score, next_sekai.ExportOptions(compressed=True)
+        )
         return Window(
-            buffer.getvalue(),
+            leveldata,
             starting_combo,
             base.combo_count,  # the full chart's combo before the cut
             audio_start,
